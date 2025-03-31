@@ -16,7 +16,8 @@
     "fs": "0.0.1-security",
     "pdfkit": "^0.13.0",
     "cookie-parser": "^1.4.6",
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.0.3",
+      "axios": "^1.6.0"
   },
   "engines": {
     "node": ">=16"
