@@ -6,7 +6,9 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
-const cookieParser = require('cookie-parser'); // Added for cookie support
+const cookieParser = require('cookie-parser');
+const axios = require('axios');
+const { OAuth2Client } = require('google-auth-library'); // Added for Google token verification
 
 const app = express();
 
@@ -16,7 +18,7 @@ app.use(cors({
   origin: true, // Allow all origins dynamically
   credentials: true // Enable cookies
 }));
-app.use(cookieParser()); // Added cookie-parser middleware
+app.use(cookieParser());
 
 // MongoDB Atlas Connection
 mongoose.connect(
@@ -29,7 +31,9 @@ mongoose.connect(
 // User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
+  password: { type: String }, // Optional for social logins
+  googleId: { type: String, unique: true, sparse: true }, // For Google users
+  githubId: { type: String, unique: true, sparse: true }, // For GitHub users
   analyses: [{
     transcription: String,
     analysis: {
@@ -43,7 +47,7 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// File upload configuration
+// File upload configuration (unchanged)
 const uploadDir = 'uploads';
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
@@ -71,7 +75,7 @@ const upload = multer({
   }
 });
 
-// Mock analysis function
+// Mock analysis function (unchanged)
 const analyzeTranscription = (transcription) => {
   return {
     Emotions: ['happy', 'calm'],
@@ -80,7 +84,7 @@ const analyzeTranscription = (transcription) => {
   };
 };
 
-// Register Route
+// Register Route (unchanged)
 app.post("/register", async (req, res) => {
   const { username, password } = req.body;
 
@@ -104,7 +108,7 @@ app.post("/register", async (req, res) => {
   }
 });
 
-// Login Route - Modified to set cookie
+// Login Route (unchanged)
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
@@ -118,19 +122,107 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    // Remove res.cookie() - rely on frontend
     res.status(200).json({ message: "Login successful", username });
   } catch (error) {
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
+// Logout Route (unchanged)
 app.post("/logout", (req, res) => {
-  res.clearCookie('username', { path: '/' }); // Still clear if any backend cookie exists
+  res.clearCookie('username', { path: '/' });
   res.status(200).json({ message: "Logout successful" });
 });
 
-// Analyze Audio Route
+// Google Login Endpoint
+const googleClient = new OAuth2Client("423273358250-erqvredg1avk5pr09ugj8uve1rg11m3m.apps.googleusercontent.com");
+app.post('/google-login', async (req, res) => {
+  try {
+    const { token } = req.body;
+    const ticket = await googleClient.verifyIdToken({
+      idToken: token,
+      audience: "423273358250-erqvredg1avk5pr09ugj8uve1rg11m3m.apps.googleusercontent.com",
+    });
+    const payload = ticket.getPayload();
+    const { sub: googleId, email, name } = payload;
+
+    // Check if user exists with this Google ID
+    let user = await User.findOne({ googleId });
+    if (!user) {
+      // Check if username (email-based) already exists to avoid duplicates
+      const username = email.split('@')[0] + Math.floor(Math.random() * 1000); // Simple unique username
+      const existingUser = await User.findOne({ username });
+      if (existingUser) {
+        return res.status(400).json({ error: "Derived username already exists" });
+      }
+
+      // Create new user
+      user = new User({
+        username,
+        googleId,
+        analyses: []
+      });
+      await user.save();
+    }
+
+    res.status(200).json({ message: "Google login successful", username: user.username });
+  } catch (error) {
+    console.error("Google login error:", error);
+    res.status(400).json({ error: 'Google login failed' });
+  }
+});
+
+// GitHub Login Endpoint
+app.post('/github-login', async (req, res) => {
+  try {
+    const { code } = req.body;
+
+    // Exchange code for access token
+    const tokenResponse = await axios.post('https://github.com/login/oauth/access_token', {
+      client_id: "Ov23liiXOYhc1dxfIBau",
+      client_secret: "54fde01a3e0a2d13c548e1ee038de1754ca5b443",
+      code,
+    }, {
+      headers: { Accept: 'application/json' }
+    });
+
+    const accessToken = tokenResponse.data.access_token;
+    if (!accessToken) {
+      return res.status(400).json({ error: 'Failed to get GitHub access token' });
+    }
+
+    // Get GitHub user info
+    const userResponse = await axios.get('https://api.github.com/user', {
+      headers: { Authorization: `token ${accessToken}` }
+    });
+    const { id: githubId, login: username, name } = userResponse.data;
+
+    // Check if user exists with this GitHub ID
+    let user = await User.findOne({ githubId });
+    if (!user) {
+      // Check if username already exists
+      const existingUser = await User.findOne({ username });
+      if (existingUser) {
+        return res.status(400).json({ error: "GitHub username already exists" });
+      }
+
+      // Create new user
+      user = new User({
+        username,
+        githubId,
+        analyses: []
+      });
+      await user.save();
+    }
+
+    res.status(200).json({ message: "GitHub login successful", username: user.username });
+  } catch (error) {
+    console.error("GitHub login error:", error);
+    res.status(400).json({ error: 'GitHub login failed' });
+  }
+});
+
+// Analyze Audio Route (unchanged)
 app.post("/analyze_audio", upload.single('file'), async (req, res) => {
   const { username } = req.body;
 
@@ -165,7 +257,7 @@ app.post("/analyze_audio", upload.single('file'), async (req, res) => {
   }
 });
 
-// Generate PDF Route
+// Generate PDF Route (unchanged)
 app.post("/generate_pdf", async (req, res) => {
   const { transcription, analysis, username } = req.body;
 
@@ -216,6 +308,7 @@ app.post("/generate_pdf", async (req, res) => {
   }
 });
 
+// Save Analysis Route (unchanged)
 app.post("/save_analysis", async (req, res) => {
   const { username, transcription, analysis } = req.body;
 
@@ -242,7 +335,7 @@ app.post("/save_analysis", async (req, res) => {
   }
 });
 
-// Get All Users Route
+// Get All Users Route (unchanged)
 app.get("/users", async (req, res) => {
   try {
     const users = await User.find()
