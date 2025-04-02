@@ -84,22 +84,42 @@ const analyzeTranscription = (transcription) => {
   };
 };
 
-// Register Route (unchanged)
-app.post("/register", async (req, res) => {
-  const { username, password } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: "Username and password are required" });
+app.post("/register", async (req, res) => {
+  const { username, password, email } = req.body;
+
+
+  if (!username || !password || !email) {
+    return res.status(400).json({ error: "Username, password, and email are required" });
+  }
+
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: "Invalid email format" });
   }
 
   try {
-    const existingUser = await User.findOne({ username });
+
+    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
     if (existingUser) {
-      return res.status(400).json({ error: "Username already exists" });
+      if (existingUser.username === username) {
+        return res.status(400).json({ error: "Username already exists" });
+      }
+      if (existingUser.email === email) {
+        return res.status(400).json({ error: "Email already exists" });
+      }
     }
 
+
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ username, password: hashedPassword, analyses: [] });
+
+    const user = new User({
+      username,
+      email,
+      password: hashedPassword,
+      analyses: []
+    });
     await user.save();
 
     res.status(201).json({ message: "Registration successful" });
@@ -367,7 +387,7 @@ app.get("/users/username", async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ 
+    const user = await User.findOne({
       username: { $regex: new RegExp(`^${username}$`, 'i') }
     }).select('-password'); // Exclude password from response
 
@@ -391,22 +411,7 @@ app.get("/users/username", async (req, res) => {
     });
   }
 });
-app.delete("/users/:id", async (req, res) => {
-  const userId = req.params.id;
-  console.log('Attempting to delete user with ID:', userId); // Log the ID
-  try {
-    const user = await User.findById(userId);
-    console.log('Found user:', user); // Log the user (or null)
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    await User.deleteOne({ _id: userId });
-    res.status(200).json({ message: "User deleted successfully" });
-  } catch (error) {
-    console.error("Error deleting user:", error.message);
-    res.status(500).json({ error: "Server error: " + error.message });
-  }
-});
+
 // Start Server
 const PORT = 5001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
