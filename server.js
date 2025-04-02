@@ -356,7 +356,41 @@ app.get("/users", async (req, res) => {
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
+app.get("/users/username", async (req, res) => {
+  try {
+    const username = req.cookies.username;
 
+    if (!username) {
+      return res.status(401).json({
+        success: false,
+        message: "No username found in cookies. Please log in."
+      });
+    }
+
+    const user = await User.findOne({ 
+      username: { $regex: new RegExp(`^${username}$`, 'i') }
+    }).select('-password'); // Exclude password from response
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message
+    });
+  }
+});
 // Start Server
 const PORT = 5001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
