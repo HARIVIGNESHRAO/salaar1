@@ -387,6 +387,22 @@ app.get("/users/username", async (req, res) => {
     });
   }
 });
+app.delete("/users/:id", async (req, res) => {
+  const userId = req.params.id;
+  console.log('Attempting to delete user with ID:', userId); // Log the ID
+  try {
+    const user = await User.findById(userId);
+    console.log('Found user:', user); // Log the user (or null)
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    await User.deleteOne({ _id: userId });
+    res.status(200).json({ message: "User deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting user:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
 
 // Start Server
 const PORT = 5001;
