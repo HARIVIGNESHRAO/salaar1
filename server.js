@@ -19,7 +19,6 @@ app.use(cors({
   credentials: true
 }));
 app.use(cookieParser());
-
 // MongoDB Atlas Connection
 mongoose.connect(
   "mongodb+srv://harisonu151:zZYoHOEqz8eiI3qP@salaar.st5tm.mongodb.net/park",
