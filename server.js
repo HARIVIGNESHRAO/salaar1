@@ -19,6 +19,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(cookieParser());
+
 // MongoDB Atlas Connection
 mongoose.connect(
   "mongodb+srv://harisonu151:zZYoHOEqz8eiI3qP@salaar.st5tm.mongodb.net/park",
@@ -27,13 +28,15 @@ mongoose.connect(
   .then(() => console.log("Connected to MongoDB Atlas"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// User Schema (unchanged, email already included)
+// Updated User Schema with age field
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
-  password: { type: String }, // Optional for social logins
-  email: { type: String, required: true, unique: true }, // Ensure email is required
+  password: { type: String },
+  email: { type: String, required: true, unique: true },
   googleId: { type: String, unique: true, sparse: true },
   githubId: { type: String, unique: true, sparse: true },
+  avatar: { type: String },
+  age: { type: Number, min: 1, max: 120 }, // Added age field with validation
   analyses: [{
     transcription: String,
     analysis: {
@@ -47,7 +50,7 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// File upload configuration (unchanged)
+// File upload configuration
 const uploadDir = 'uploads';
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
@@ -69,7 +72,7 @@ const upload = multer({
   }
 });
 
-// Mock analysis function (unchanged)
+// Mock analysis function
 const analyzeTranscription = (transcription) => {
   return {
     Emotions: ['happy', 'calm'],
@@ -78,9 +81,29 @@ const analyzeTranscription = (transcription) => {
   };
 };
 
-// Register Route (unchanged, already includes email)
+// Authentication Middleware
+const authMiddleware = async (req, res, next) => {
+  try {
+    const username = req.cookies.username;
+    if (!username) {
+      return res.status(401).json({ error: "Please log in first" });
+    }
+
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: "Authentication error: " + error.message });
+  }
+};
+
+// Register Route - Updated to include age
 app.post("/register", async (req, res) => {
-  const { username, password, email } = req.body;
+  const { username, password, email, avatar, age } = req.body;
 
   if (!username || !password || !email) {
     return res.status(400).json({ error: "Username, password, and email are required" });
@@ -91,6 +114,10 @@ app.post("/register", async (req, res) => {
     return res.status(400).json({ error: "Invalid email format" });
   }
 
+  if (age && (isNaN(age) || age < 1 || age > 120)) {
+    return res.status(400).json({ error: "Age must be a number between 1 and 120" });
+  }
+
   try {
     const existingUser = await User.findOne({ $or: [{ username }, { email }] });
     if (existingUser) {
@@ -99,16 +126,23 @@ app.post("/register", async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ username, email, password: hashedPassword, analyses: [] });
+    const user = new User({
+      username,
+      email,
+      password: hashedPassword,
+      avatar,
+      age, // Include age if provided
+      analyses: []
+    });
     await user.save();
 
-    res.status(201).json({ message: "Registration successful" });
+    res.status(201).json({ message: "Registration successful", username, email, avatar, age });
   } catch (error) {
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
-// Login Route (updated to return email)
+// Login Route - Updated to return age
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
@@ -122,19 +156,26 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    res.status(200).json({ message: "Login successful", username: user.username, email: user.email });
+    res.cookie('username', username, { httpOnly: true });
+    res.status(200).json({
+      message: "Login successful",
+      username: user.username,
+      email: user.email,
+      avatar: user.avatar,
+      age: user.age // Include age
+    });
   } catch (error) {
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
-// Logout Route (unchanged)
+// Logout Route
 app.post("/logout", (req, res) => {
   res.clearCookie('username', { path: '/' });
   res.status(200).json({ message: "Logout successful" });
 });
 
-// Google Login Endpoint (updated to save and return email)
+// Google Login Endpoint - Updated to return age
 const googleClient = new OAuth2Client("423273358250-erqvredg1avk5pr09ugj8uve1rg11m3m.apps.googleusercontent.com");
 app.post('/google-login', async (req, res) => {
   try {
@@ -157,21 +198,29 @@ app.post('/google-login', async (req, res) => {
 
       user = new User({
         username,
-        email, // Save email from Google
+        email,
         googleId,
-        analyses: []
+        analyses: [],
+        age: null // Set age to null initially, can be updated later
       });
       await user.save();
     }
 
-    res.status(200).json({ message: "Google login successful", username: user.username, email: user.email });
+    res.cookie('username', user.username, { httpOnly: true });
+    res.status(200).json({
+      message: "Google login successful",
+      username: user.username,
+      email: user.email,
+      avatar: user.avatar,
+      age: user.age // Include age
+    });
   } catch (error) {
     console.error("Google login error:", error);
     res.status(400).json({ error: 'Google login failed' });
   }
 });
 
-// GitHub Login Endpoint (updated to save and return email)
+// GitHub Login Endpoint - Updated to return age
 app.post('/github-login', async (req, res) => {
   try {
     const { code } = req.body;
@@ -202,21 +251,29 @@ app.post('/github-login', async (req, res) => {
 
       user = new User({
         username,
-        email: githubEmail || `${username}@github.com`, // Fallback if email is null
+        email: githubEmail || `${username}@github.com`,
         githubId,
-        analyses: []
+        analyses: [],
+        age: null // Set age to null initially, can be updated later
       });
       await user.save();
     }
 
-    res.status(200).json({ message: "GitHub login successful", username: user.username, email: user.email });
+    res.cookie('username', user.username, { httpOnly: true });
+    res.status(200).json({
+      message: "GitHub login successful",
+      username: user.username,
+      email: user.email,
+      avatar: user.avatar,
+      age: user.age // Include age
+    });
   } catch (error) {
     console.error("GitHub login error:", error);
     res.status(400).json({ error: 'GitHub login failed' });
   }
 });
 
-// Analyze Audio Route (updated to include email in response)
+// Analyze Audio Route
 app.post("/analyze_audio", upload.single('file'), async (req, res) => {
   const { username } = req.body;
 
@@ -251,7 +308,7 @@ app.post("/analyze_audio", upload.single('file'), async (req, res) => {
   }
 });
 
-// Generate PDF Route (unchanged, email not needed in PDF)
+// Generate PDF Route
 app.post("/generate_pdf", async (req, res) => {
   const { transcription, analysis, username } = req.body;
 
@@ -302,7 +359,7 @@ app.post("/generate_pdf", async (req, res) => {
   }
 });
 
-// Save Analysis Route (updated to include email in response)
+// Save Analysis Route
 app.post("/save_analysis", async (req, res) => {
   const { username, transcription, analysis } = req.body;
 
@@ -328,7 +385,95 @@ app.post("/save_analysis", async (req, res) => {
   }
 });
 
-// Get All Users Route (unchanged, email already included with -password)
+// Export All Analyses Route
+app.post("/users/:username/export-analyses", async (req, res) => {
+  const { username } = req.params;
+
+  try {
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const doc = new PDFDocument();
+    const filename = `all_analyses_${username}_${Date.now()}.pdf`;
+    doc.pipe(fs.createWriteStream(filename));
+
+    doc.fontSize(22).text(`All Mental Health Analyses for ${username}`, { align: 'center' });
+    doc.fontSize(10).text(`Generated on: ${new Date().toLocaleString()}`, { align: 'left' });
+    doc.moveDown();
+
+    user.analyses.forEach((analysis, index) => {
+      doc.fontSize(16).text(`Analysis ${index + 1}`, { underline: true });
+      doc.moveDown(0.5);
+
+      doc.fontSize(14).text('Transcription:');
+      doc.fontSize(10).text(analysis.transcription || 'Not provided', { align: 'left' });
+      doc.moveDown();
+
+      doc.fontSize(14).text('Emotions Identified:');
+      (analysis.analysis.Emotions || []).forEach(emotion => doc.text(`• ${emotion}`));
+      doc.moveDown();
+
+      doc.fontSize(14).text('Possible Reasons:');
+      doc.fontSize(10).text(analysis.analysis.Reasons || 'Not provided', { align: 'justify' });
+      doc.moveDown();
+
+      doc.fontSize(14).text('Suggestions:');
+      (analysis.analysis.Suggestions || []).forEach(suggestion => doc.text(`✔ ${suggestion}`));
+      doc.moveDown();
+
+      if (index < user.analyses.length - 1) doc.addPage();
+    });
+
+    doc.end();
+
+    res.download(filename, `All_Analyses_${username}.pdf`, (err) => {
+      if (!err) {
+        fs.unlinkSync(filename);
+      } else {
+        console.error('Export error:', err);
+        res.status(500).json({ error: "Failed to export analyses" });
+      }
+    });
+  } catch (error) {
+    console.error("Export error:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
+// Delete Analysis Route
+app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
+  const { username, analysisId } = req.params;
+  try {
+    const db = mongoose.connection.db;
+    const collection = db.collection('users');
+
+    const result = await collection.updateOne(
+      { username },
+      { $pull: { analyses: { _id: new mongoose.Types.ObjectId(analysisId) } } }
+    );
+
+    if (result.modifiedCount === 0) {
+      const user = await User.findOne({ username });
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User not found" });
+      }
+      const analysisExists = user.analyses.some(a => a._id.toString() === analysisId);
+      if (!analysisExists) {
+        return res.status(404).json({ success: false, message: "Analysis not found" });
+      }
+      return res.status(500).json({ success: false, message: "Failed to delete analysis" });
+    }
+
+    res.status(200).json({ success: true, message: "Analysis deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting analysis:", error.message);
+    res.status(500).json({ success: false, message: "Server error: " + error.message });
+  }
+});
+
+// Get All Users Route - Updated to include age
 app.get("/users", async (req, res) => {
   try {
     const users = await User.find()
@@ -342,7 +487,11 @@ app.get("/users", async (req, res) => {
     res.status(200).json({
       message: "Users retrieved successfully",
       count: users.length,
-      users: users
+      users: users.map(user => ({
+        ...user,
+        avatar: user.avatar,
+        age: user.age // Include age
+      }))
     });
   } catch (error) {
     console.error("Error fetching users:", error.message);
@@ -350,7 +499,7 @@ app.get("/users", async (req, res) => {
   }
 });
 
-// Get User by Username Route (updated to ensure email is included)
+// Get User by Username Route - Updated to include age
 app.get("/users/username", async (req, res) => {
   try {
     const username = req.cookies.username;
@@ -375,7 +524,13 @@ app.get("/users/username", async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: { username: user.username, email: user.email, analyses: user.analyses }
+      data: {
+        username: user.username,
+        email: user.email,
+        avatar: user.avatar,
+        age: user.age, // Include age
+        analyses: user.analyses
+      }
     });
   } catch (error) {
     console.error('Error fetching user:', error);
@@ -386,12 +541,12 @@ app.get("/users/username", async (req, res) => {
     });
   }
 });
+
+// Delete User Route
 app.delete("/users/:id", async (req, res) => {
   const userId = req.params.id;
-  console.log('Attempting to delete user with ID:', userId); // Log the ID
   try {
     const user = await User.findById(userId);
-    console.log('Found user:', user); // Log the user (or null)
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -399,6 +554,80 @@ app.delete("/users/:id", async (req, res) => {
     res.status(200).json({ message: "User deleted successfully" });
   } catch (error) {
     console.error("Error deleting user:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
+// Profile Routes
+// Get User Profile - Updated to include age
+app.get("/api/user/profile", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username })
+      .select('username email name avatar age -_id'); // Include age
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.status(200).json({
+      username: user.username,
+      email: user.email,
+      name: user.name || user.username,
+      avatar: user.avatar,
+      age: user.age // Include age
+    });
+  } catch (error) {
+    console.error("Error fetching profile:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
+// Update User Profile - Updated to handle age with corrected syntax
+app.put("/api/user/profile", authMiddleware, async (req, res) => {
+  const { name, email, avatar, age } = req.body;
+
+  if (!name || !email) {
+    return res.status(400).json({ error: "Name and email are required" });
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: "Invalid email format" });
+  }
+
+  if (age && (isNaN(age) || age < 1 || age > 120)) {
+    return res.status(400).json({ error: "Age must be a number between 1 and 120" });
+  }
+
+  try {
+    const emailInUse = await User.findOne({
+      email,
+      username: { $ne: req.user.username }
+    });
+    if (emailInUse) {
+      return res.status(400).json({ error: "Email already in use" }); // Corrected syntax
+    }
+
+    const updatedUser = await User.findOneAndUpdate(
+      { username: req.user.username },
+      { name, email, avatar, age }, // Include age
+      { new: true, runValidators: true }
+    ).select('username email name avatar age -_id');
+
+    if (!updatedUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.status(200).json({
+      message: "Profile updated successfully",
+      username: updatedUser.username,
+      email: updatedUser.email,
+      name: updatedUser.name,
+      avatar: updatedUser.avatar,
+      age: updatedUser.age // Include age
+    });
+  } catch (error) {
+    console.error("Error updating profile:", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
