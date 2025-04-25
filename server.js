@@ -9,6 +9,11 @@ const PDFDocument = require('pdfkit');
 const cookieParser = require('cookie-parser');
 const axios = require('axios');
 const { OAuth2Client } = require('google-auth-library');
+const twilio = require('twilio');
+require('dotenv').config();
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 const app = express();
 
@@ -28,24 +33,61 @@ mongoose.connect(
   .then(() => console.log("Connected to MongoDB Atlas"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// Updated User Schema with age field
+// Updated User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String },
   email: { type: String, required: true, unique: true },
+  name: { type: String },
+  phoneNumber: { type: String },
   googleId: { type: String, unique: true, sparse: true },
   githubId: { type: String, unique: true, sparse: true },
   avatar: { type: String },
-  age: { type: Number, min: 1, max: 120 }, // Added age field with validation
+  age: { type: Number, min: 1, max: 120 },
+  followUpRequired: { type: Boolean, default: false },
+  AppointmentApproved: { type: Boolean, default: false },
+  visits: { type: Number, default: 0 },
+  appointments: [{
+    date: { type: String, required: true },
+    time: { type: String, required: true },
+    doctor: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+  }],
   analyses: [{
-    transcription: String,
+    transcription: { type: String },
     analysis: {
       Emotions: [String],
       Reasons: String,
       Suggestions: [String],
     },
     createdAt: { type: Date, default: Date.now }
-  }]
+  }],
+  session: {
+    sessionActive: { type: Boolean, default: false },
+    question: { type: String, default: '' },
+    sessionEnded: { type: Boolean, default: false },
+    responses: [{
+      audioPath: { type: String, required: true },
+      question: { type: String, required: true },
+      language: { type: String, default: 'en' },
+      createdAt: { type: Date, default: Date.now }
+    }],
+    latestAnalysis: {
+      transcriptions: [{
+        question: String,
+        text: String
+      }],
+      individual_analyses: [{
+        Emotions: [String],
+        Tones: [String],
+        Reasons: String,
+        Suggestions: [String]
+      }],
+      combined_analysis: String,
+      createdAt: { type: Date }
+    },
+    updatedAt: { type: Date, default: Date.now }
+  }
 });
 
 const User = mongoose.model("User", userSchema);
@@ -58,13 +100,13 @@ if (!fs.existsSync(uploadDir)) {
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
 });
 
 const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
-    const filetypes = /mp3|wav|m4a/;
+    const filetypes = /mp3|wav|m4a|webm/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) return cb(null, true);
@@ -101,9 +143,14 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-// Register Route - Updated to include age
+// Twilio Client Setup
+const accountSid = 'AC071c2e4f78644188575c935e3cad0688';
+const authToken = 'e551a6de20f900289baa42675392e5b5';
+const client = require('twilio')(accountSid, authToken);
+
+// Register Route
 app.post("/register", async (req, res) => {
-  const { username, password, email, avatar, age } = req.body;
+  const { username, password, email, name, phoneNumber, avatar, age } = req.body;
 
   if (!username || !password || !email) {
     return res.status(400).json({ error: "Username, password, and email are required" });
@@ -112,6 +159,10 @@ app.post("/register", async (req, res) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
     return res.status(400).json({ error: "Invalid email format" });
+  }
+
+  if (phoneNumber && !/^\+?[1-9]\d{1,14}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: "Invalid phone number format" });
   }
 
   if (age && (isNaN(age) || age < 1 || age > 120)) {
@@ -130,39 +181,77 @@ app.post("/register", async (req, res) => {
       username,
       email,
       password: hashedPassword,
+      name,
+      phoneNumber,
       avatar,
-      age, // Include age if provided
-      analyses: []
+      age,
+      followUpRequired: false,
+      AppointmentApproved: false,
+      appointments: [],
+      session: { sessionActive: false, question: '', sessionEnded: false, responses: [], latestAnalysis: null }
     });
     await user.save();
 
-    res.status(201).json({ message: "Registration successful", username, email, avatar, age });
+    res.status(201).json({
+      message: "Registration successful",
+      username,
+      email,
+      name,
+      phoneNumber,
+      avatar,
+      age,
+      followUpRequired: false,
+      AppointmentApproved: false,
+      appointments: []
+    });
   } catch (error) {
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
-// Login Route - Updated to return age
+// Login Route
 app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password,recaptchaToken } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: "Username and password are required" });
+  if (!username || !password || !recaptchaToken) {
+    return res.status(400).json({ error: "Username,password and reCAPTCHA are required" });
   }
+  try {
+    const recaptchaResponse = await axios.post(
+      'https://www.google.com/recaptcha/api/siteverify',
+      null,
+      {
+        params: {
+          secret: '6LdmdCQrAAAAAAINuyE1OZ0n5VIu7nZLUOT0js8f',
+          response: recaptchaToken,
+        },
+      }
+    );
 
+    const { success, score } = recaptchaResponse.data;
+    if (!success) {
+      return res.status(400).json({ error: 'reCAPTCHA verification failed' });
+    }
+  } catch (error) {
+    return res.status(500).json({ error: 'reCAPTCHA verification error: ' + error.message });
+  }
   try {
     const user = await User.findOne({ username });
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    res.cookie('username', username, { httpOnly: true });
+    res.cookie('username', username, { httpOnly: false });
     res.status(200).json({
       message: "Login successful",
       username: user.username,
       email: user.email,
       avatar: user.avatar,
-      age: user.age // Include age
+      age: user.age,
+      phoneNumber: user.phoneNumber,
+      followUpRequired: user.followUpRequired,
+      AppointmentApproved: user.AppointmentApproved,
+      appointments: user.appointments
     });
   } catch (error) {
     res.status(500).json({ error: "Server error: " + error.message });
@@ -175,7 +264,7 @@ app.post("/logout", (req, res) => {
   res.status(200).json({ message: "Logout successful" });
 });
 
-// Google Login Endpoint - Updated to return age
+// Google Login Endpoint
 const googleClient = new OAuth2Client("423273358250-erqvredg1avk5pr09ugj8uve1rg11m3m.apps.googleusercontent.com");
 app.post('/google-login', async (req, res) => {
   try {
@@ -200,8 +289,13 @@ app.post('/google-login', async (req, res) => {
         username,
         email,
         googleId,
+        name,
+        followUpRequired: false,
+        AppointmentApproved: false,
+        appointments: [],
         analyses: [],
-        age: null // Set age to null initially, can be updated later
+        age: null,
+        session: { sessionActive: false, question: '', sessionEnded: false, responses: [], latestAnalysis: null }
       });
       await user.save();
     }
@@ -212,7 +306,11 @@ app.post('/google-login', async (req, res) => {
       username: user.username,
       email: user.email,
       avatar: user.avatar,
-      age: user.age // Include age
+      age: user.age,
+      phoneNumber: user.phoneNumber,
+      followUpRequired: user.followUpRequired,
+      AppointmentApproved: user.AppointmentApproved,
+      appointments: user.appointments
     });
   } catch (error) {
     console.error("Google login error:", error);
@@ -220,7 +318,7 @@ app.post('/google-login', async (req, res) => {
   }
 });
 
-// GitHub Login Endpoint - Updated to return age
+// GitHub Login Endpoint
 app.post('/github-login', async (req, res) => {
   try {
     const { code } = req.body;
@@ -253,8 +351,12 @@ app.post('/github-login', async (req, res) => {
         username,
         email: githubEmail || `${username}@github.com`,
         githubId,
+        followUpRequired: false,
+        AppointmentApproved: false,
+        appointments: [],
         analyses: [],
-        age: null // Set age to null initially, can be updated later
+        age: null,
+        session: { sessionActive: false, question: '', sessionEnded: false, responses: [], latestAnalysis: null }
       });
       await user.save();
     }
@@ -265,7 +367,11 @@ app.post('/github-login', async (req, res) => {
       username: user.username,
       email: user.email,
       avatar: user.avatar,
-      age: user.age // Include age
+      age: user.age,
+      phoneNumber: user.phoneNumber,
+      followUpRequired: user.followUpRequired,
+      AppointmentApproved: user.AppointmentApproved,
+      appointments: user.appointments
     });
   } catch (error) {
     console.error("GitHub login error:", error);
@@ -299,7 +405,15 @@ app.post("/analyze_audio", upload.single('file'), async (req, res) => {
 
     fs.unlinkSync(req.file.path);
 
-    res.json({ username, email: user.email, transcription, analysis });
+    res.json({
+      username,
+      email: user.email,
+      transcription,
+      analysis,
+      followUpRequired: user.followUpRequired,
+      AppointmentApproved: user.AppointmentApproved,
+      appointments: user.appointments
+    });
   } catch (error) {
     if (fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
@@ -310,18 +424,13 @@ app.post("/analyze_audio", upload.single('file'), async (req, res) => {
 
 // Generate PDF Route
 app.post("/generate_pdf", async (req, res) => {
-  const { transcription, analysis, username } = req.body;
+  const { analysis } = req.body;
 
-  if (!analysis || !username) {
-    return res.status(400).json({ error: "Missing required data" });
+  if (!analysis) {
+    return res.status(400).json({ error: "Analysis data is required" });
   }
 
   try {
-    const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(401).json({ error: "Invalid username" });
-    }
-
     const doc = new PDFDocument();
     const filename = `mental_health_report_${Date.now()}.pdf`;
     doc.pipe(fs.createWriteStream(filename));
@@ -330,12 +439,12 @@ app.post("/generate_pdf", async (req, res) => {
     doc.fontSize(10).text(`Date: ${new Date().toLocaleString()}`, { align: 'left' });
     doc.moveDown();
 
-    doc.fontSize(14).text('Transcription:');
-    doc.fontSize(10).text(transcription || 'Not provided', { align: 'left' });
-    doc.moveDown();
-
     doc.fontSize(14).text('Emotions Identified:');
     (analysis.Emotions || []).forEach(emotion => doc.text(`• ${emotion}`));
+    doc.moveDown();
+
+    doc.fontSize(14).text('Tones Identified:');
+    (analysis.Tones || []).forEach(tone => doc.text(`• ${tone}`));
     doc.moveDown();
 
     doc.fontSize(14).text('Possible Reasons:');
@@ -360,28 +469,43 @@ app.post("/generate_pdf", async (req, res) => {
 });
 
 // Save Analysis Route
-app.post("/save_analysis", async (req, res) => {
-  const { username, transcription, analysis } = req.body;
-
-  if (!username || !transcription || !analysis) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
+app.post('/save_analysis', async (req, res) => {
   try {
-    const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
+    const { username,transcriptions, analyses } = req.body;
+
+    if (!username) {
+      return res.status(401).json({ error: 'User not authenticated' });
     }
 
-    user.analyses.push({ transcription, analysis });
-    await user.save();
+    if (!transcriptions || !analyses || transcriptions.length !== analyses.length || transcriptions.length === 0) {
+      return res.status(400).json({ error: 'Both transcriptions and analyses are required and must match in length' });
+    }
 
-    console.log(`Analysis saved for ${username}:`, { transcription, analysis });
+    const analysesToSave = transcriptions.map((transcription, index) => ({
+      transcription,
+      analysis: analyses[index],
+      createdAt: new Date()
+    }));
 
-    res.json({ message: "Analysis saved successfully", username, email: user.email });
+    const user = await User.findOneAndUpdate(
+      { username },
+      {
+        $push: {
+          analyses: { $each: analysesToSave }
+        },
+        $inc: { visits: 1 }
+      },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.status(200).json({ message: 'Analyses saved successfully', visits: user.visits });
   } catch (error) {
-    console.error("Error saving analysis:", error.message);
-    res.status(500).json({ error: "Server error" });
+    console.error('Error saving analyses:', error);
+    res.status(500).json({ error: 'Failed to save analyses' });
   }
 });
 
@@ -416,7 +540,7 @@ app.post("/users/:username/export-analyses", async (req, res) => {
       doc.moveDown();
 
       doc.fontSize(14).text('Possible Reasons:');
-      doc.fontSize(10).text(analysis.analysis.Reasons || 'Not provided', { align: 'justify' });
+      doc.fontSize(10).text(analysis.analysis.Reasons || 'Not provided', { align: 'left' });
       doc.moveDown();
 
       doc.fontSize(14).text('Suggestions:');
@@ -446,10 +570,7 @@ app.post("/users/:username/export-analyses", async (req, res) => {
 app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
   const { username, analysisId } = req.params;
   try {
-    const db = mongoose.connection.db;
-    const collection = db.collection('users');
-
-    const result = await collection.updateOne(
+    const result = await User.updateOne(
       { username },
       { $pull: { analyses: { _id: new mongoose.Types.ObjectId(analysisId) } } }
     );
@@ -473,11 +594,11 @@ app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
   }
 });
 
-// Get All Users Route - Updated to include age
+// Get All Users Route
 app.get("/users", async (req, res) => {
   try {
     const users = await User.find()
-      .select('-password')
+      .select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses googleId githubId avatar')
       .lean();
 
     if (!users || users.length === 0) {
@@ -487,11 +608,7 @@ app.get("/users", async (req, res) => {
     res.status(200).json({
       message: "Users retrieved successfully",
       count: users.length,
-      users: users.map(user => ({
-        ...user,
-        avatar: user.avatar,
-        age: user.age // Include age
-      }))
+      users
     });
   } catch (error) {
     console.error("Error fetching users:", error.message);
@@ -499,7 +616,7 @@ app.get("/users", async (req, res) => {
   }
 });
 
-// Get User by Username Route - Updated to include age
+// Get User by Username Route
 app.get("/users/username", async (req, res) => {
   try {
     const username = req.cookies.username;
@@ -513,7 +630,7 @@ app.get("/users/username", async (req, res) => {
 
     const user = await User.findOne({
       username: { $regex: new RegExp(`^${username}$`, 'i') }
-    }).select('-password');
+    }).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
 
     if (!user) {
       return res.status(404).json({
@@ -527,9 +644,13 @@ app.get("/users/username", async (req, res) => {
       data: {
         username: user.username,
         email: user.email,
-        avatar: user.avatar,
-        age: user.age, // Include age
-        analyses: user.analyses
+        phoneNumber: user.phoneNumber,
+        age: user.age,
+        followUpRequired: user.followUpRequired,
+        AppointmentApproved: user.AppointmentApproved,
+        appointments: user.appointments,
+        analyses: user.analyses,
+        avatar: user.avatar
       }
     });
   } catch (error) {
@@ -558,12 +679,42 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
+// Update Follow-Up Status Route
+app.patch("/users/:id", async (req, res) => {
+  const { id } = req.params;
+  const { followUpRequired } = req.body;
+
+  if (typeof followUpRequired !== 'boolean') {
+    return res.status(400).json({ error: "followUpRequired must be a boolean" });
+  }
+
+  try {
+    const user = await User.findByIdAndUpdate(
+      id,
+      { followUpRequired },
+      { new: true, runValidators: true }
+    ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.status(200).json({
+      message: "Follow-up status updated successfully",
+      user
+    });
+  } catch (error) {
+    console.error("Error updating follow-up status:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
 // Profile Routes
-// Get User Profile - Updated to include age
+// Get User Profile
 app.get("/api/user/profile", authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username })
-      .select('username email name avatar age -_id'); // Include age
+      .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits -_id');
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
@@ -574,7 +725,12 @@ app.get("/api/user/profile", authMiddleware, async (req, res) => {
       email: user.email,
       name: user.name || user.username,
       avatar: user.avatar,
-      age: user.age // Include age
+      age: user.age,
+      phoneNumber: user.phoneNumber,
+      followUpRequired: user.followUpRequired,
+      AppointmentApproved: user.AppointmentApproved,
+      appointments: user.appointments,
+      visits: user.visits
     });
   } catch (error) {
     console.error("Error fetching profile:", error);
@@ -582,9 +738,9 @@ app.get("/api/user/profile", authMiddleware, async (req, res) => {
   }
 });
 
-// Update User Profile - Updated to handle age with corrected syntax
+// Update User Profile
 app.put("/api/user/profile", authMiddleware, async (req, res) => {
-  const { name, email, avatar, age } = req.body;
+  const { name, email, avatar, age, phoneNumber } = req.body;
 
   if (!name || !email) {
     return res.status(400).json({ error: "Name and email are required" });
@@ -599,20 +755,37 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
     return res.status(400).json({ error: "Age must be a number between 1 and 120" });
   }
 
+  if (phoneNumber) {
+    const phoneRegex = /^\+?[\d\s-]{10,}$/;
+    if (!phoneRegex.test(phoneNumber)) {
+      return res.status(400).json({ error: "Invalid phone number format" });
+    }
+  }
+
   try {
     const emailInUse = await User.findOne({
       email,
       username: { $ne: req.user.username }
     });
     if (emailInUse) {
-      return res.status(400).json({ error: "Email already in use" }); // Corrected syntax
+      return res.status(400).json({ error: "Email already in use" });
+    }
+
+    if (phoneNumber) {
+      const phoneInUse = await User.findOne({
+        phoneNumber,
+        username: { $ne: req.user.username }
+      });
+      if (phoneInUse) {
+        return res.status(400).json({ error: "Phone number already in use" });
+      }
     }
 
     const updatedUser = await User.findOneAndUpdate(
       { username: req.user.username },
-      { name, email, avatar, age }, // Include age
+      { name, email, avatar, age, phoneNumber },
       { new: true, runValidators: true }
-    ).select('username email name avatar age -_id');
+    ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments -_id');
 
     if (!updatedUser) {
       return res.status(404).json({ error: "User not found" });
@@ -624,7 +797,11 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
       email: updatedUser.email,
       name: updatedUser.name,
       avatar: updatedUser.avatar,
-      age: updatedUser.age // Include age
+      age: updatedUser.age,
+      phoneNumber: updatedUser.phoneNumber,
+      followUpRequired: updatedUser.followUpRequired,
+      AppointmentApproved: updatedUser.AppointmentApproved,
+      appointments: updatedUser.appointments
     });
   } catch (error) {
     console.error("Error updating profile:", error);
@@ -632,6 +809,342 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
   }
 });
 
-// Start Server
+// Send SMS Route
+app.post("/api/send-sms", authMiddleware, async (req, res) => {
+  const { phoneNumber, date, time } = req.body;
+  if (!phoneNumber || !date || !time) {
+    return res.status(400).json({ error: "Phone number, date, and time are required" });
+  }
+
+  const phoneRegex = /^\+[1-9]\d{1,14}$/;
+  if (!phoneRegex.test(phoneNumber)) {
+    return res.status(400).json({ error: "Invalid phone number format. Must include country code (e.g., +91)" });
+  }
+
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || user.phoneNumber !== phoneNumber.replace('+91', '')) {
+      return res.status(403).json({ error: "Phone number does not match user profile" });
+    }
+
+    const messageBody = `Hi, just a reminder: you’re set to see Dr. Prashik on ${date} at ${time}`;
+
+    const message = await client.messages.create({
+      body: messageBody,
+      from: '+19479008412',
+      to: phoneNumber
+    });
+
+    console.log('SMS sent:', message.sid);
+    res.status(200).json({ message: "SMS sent successfully", sid: message.sid });
+  } catch (error) {
+    console.error("Twilio error:", error);
+    res.status(500).json({ error: "Failed to send SMS", details: error.message });
+  }
+});
+
+// Approve Appointment Route
+app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
+  const { date, time, doctor } = req.body;
+
+  if (!date || !time || !doctor) {
+    return res.status(400).json({ error: "Date, time, and doctor are required" });
+  }
+
+  try {
+    const user = await User.findOneAndUpdate(
+      { username: req.user.username },
+      {
+        $set: { AppointmentApproved: true },
+        $push: {
+          appointments: {
+            date,
+            time,
+            doctor,
+            createdAt: new Date()
+          }
+        }
+      },
+      { new: true, runValidators: true }
+    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.status(200).json({
+      message: "Appointment approved and saved successfully",
+      user: {
+        username: user.username,
+        email: user.email,
+        phoneNumber: user.phoneNumber,
+        AppointmentApproved: user.AppointmentApproved,
+        followUpRequired: user.followUpRequired,
+        appointments: user.appointments
+      }
+    });
+  } catch (error) {
+    console.error("Error approving appointment:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
+// Session Management Routes
+// Get Active Session
+app.get('/api/session/active', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username })
+      .select('session');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.status(200).json({
+      active: user.session.sessionActive,
+      question: user.session.question,
+      sessionEnded: user.session.sessionEnded
+    });
+  } catch (error) {
+    console.error('Error fetching session:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
+// Start Session
+app.post('/api/session/start', authMiddleware, async (req, res) => {
+  const { userId, question } = req.body;
+
+  if (!userId || !question) {
+    return res.status(400).json({ error: 'User ID and question are required' });
+  }
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          'session.sessionActive': true,
+          'session.question': question,
+          'session.sessionEnded': false,
+          'session.responses': [],
+          'session.latestAnalysis': null,
+          'session.updatedAt': new Date()
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    console.log(`Session started for user ${userId} with question: ${question}`);
+    res.status(200).json({ message: 'Session started' });
+  } catch (error) {
+    console.error('Error starting session:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
+// Record Session Response
+app.post('/api/session/record_response', authMiddleware, upload.single('file'), async (req, res) => {
+  const { question, language } = req.body;
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'Audio file is required' });
+  }
+
+  if (!question || !language) {
+    return res.status(400).json({ error: 'Question and language are required' });
+  }
+
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) {
+      fs.unlinkSync(req.file.path);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!user.session.sessionActive || user.session.question !== question) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'No active session or invalid question' });
+    }
+
+    // Check if response already exists
+    if (user.session.responses.length > 0) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Response already recorded for this session' });
+    }
+
+    const response = {
+      audioPath: req.file.path,
+      question,
+      language,
+      createdAt: new Date()
+    };
+
+    user.session.responses.push(response);
+    await user.save();
+
+    res.status(200).json({ message: 'Response recorded successfully' });
+  } catch (error) {
+    if (fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    console.error('Error recording response:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
+// Get Session Responses
+app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!user.session.sessionActive) {
+      return res.status(400).json({ error: 'No active session for this user' });
+    }
+
+    const responses = user.session.responses.map(response => ({
+      audioPath: response.audioPath,
+      question: response.question,
+      language: response.language,
+      createdAt: response.createdAt
+    }));
+
+    res.status(200).json({ responses });
+  } catch (error) {
+    console.error('Error fetching session responses:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
+// Save Session Analysis
+app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
+  const { userId, analysis } = req.body;
+
+  if (!userId || !analysis) {
+    return res.status(400).json({ error: 'User ID and analysis data are required' });
+  }
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Save analysis to session
+    user.session.latestAnalysis = {
+      transcriptions: analysis.transcriptions,
+      individual_analyses: analysis.individual_analyses,
+      combined_analysis: analysis.combined_analysis,
+      createdAt: new Date()
+    };
+
+    // Save transcriptions and analyses to user's analyses
+    const analysesToSave = analysis.transcriptions.map((transcription, index) => ({
+      transcription: transcription.text,
+      analysis: analysis.individual_analyses[index],
+      createdAt: new Date()
+    }));
+
+    user.analyses.push(...analysesToSave);
+    user.visits += 1;
+
+    // Clean up response audio files
+    user.session.responses.forEach(response => {
+      if (fs.existsSync(response.audioPath)) {
+        fs.unlinkSync(response.audioPath);
+      }
+    });
+
+    user.session.responses = [];
+    await user.save();
+
+    res.status(200).json({ message: 'Analysis saved successfully' });
+  } catch (error) {
+    console.error('Error saving session analysis:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
+// Get Latest Session Analysis
+app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username })
+      .select('session.latestAnalysis');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.status(200).json({
+      analysis: user.session.latestAnalysis
+    });
+  } catch (error) {
+    console.error('Error fetching latest analysis:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
+// End Session
+app.post('/api/session/end', authMiddleware, async (req, res) => {
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!user.session.sessionActive) {
+      return res.status(400).json({ error: 'No active session for this user' });
+    }
+
+    // Clean up response audio files
+    user.session.responses.forEach(response => {
+      if (fs.existsSync(response.audioPath)) {
+        fs.unlinkSync(response.audioPath);
+      }
+    });
+
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          'session.sessionActive': false,
+          'session.question': '',
+          'session.sessionEnded': true,
+          'session.responses': [],
+          'session.updatedAt': new Date()
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    console.log(`Session ended for user ${userId}`);
+    res.status(200).json({ message: 'Session ended' });
+  } catch (error) {
+    console.error('Error ending session:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
 const PORT = 5001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
