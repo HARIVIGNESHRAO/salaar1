@@ -10,10 +10,30 @@ const cookieParser = require('cookie-parser');
 const axios = require('axios');
 const { OAuth2Client } = require('google-auth-library');
 const twilio = require('twilio');
+const emailjs = require('@emailjs/nodejs');
 require('dotenv').config();
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
+
+// Validate required environment variables
+const requiredEnvVars = [
+  'MONGODB_URI',
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_AUTH_TOKEN',
+  'TWILIO_PHONE_NUMBER',
+  'GOOGLE_CLIENT_ID',
+  'EMAILJS_PUBLIC_KEY',
+  'EMAILJS_PRIVATE_KEY',
+  'EMAILJS_SERVICE_ID',
+  'EMAILJS_TEMPLATE_ID'
+];
+
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingEnvVars.length > 0) {
+  console.error(`Missing required environment variables: ${missingEnvVars.join(', ')}`);
+  process.exit(1);
+}
 
 const app = express();
 
@@ -21,15 +41,22 @@ const app = express();
 app.use(express.json());
 app.use(cors({
   origin: true,
-  credentials: true
+  credentials: true,
+  httpOnly: true
 }));
 app.use(cookieParser());
 
+// Initialize EmailJS
+emailjs.init({
+  publicKey: process.env.EMAILJS_PUBLIC_KEY,
+  privateKey: process.env.EMAILJS_PRIVATE_KEY,
+});
+
 // MongoDB Atlas Connection
-mongoose.connect(
-  "mongodb+srv://harisonu151:zZYoHOEqz8eiI3qP@salaar.st5tm.mongodb.net/park",
-  { useNewUrlParser: true, useUnifiedTopology: true }
-)
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
   .then(() => console.log("Connected to MongoDB Atlas"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
@@ -47,6 +74,8 @@ const userSchema = new mongoose.Schema({
   followUpRequired: { type: Boolean, default: false },
   AppointmentApproved: { type: Boolean, default: false },
   visits: { type: Number, default: 0 },
+  resetPasswordToken: { type: String },
+  resetPasswordExpires: { type: Date },
   appointments: [{
     date: { type: String, required: true },
     time: { type: String, required: true },
@@ -144,9 +173,75 @@ const authMiddleware = async (req, res, next) => {
 };
 
 // Twilio Client Setup
-const accountSid = 'AC071c2e4f78644188575c935e3cad0688';
-const authToken = 'e551a6de20f900289baa42675392e5b5';
-const client = require('twilio')(accountSid, authToken);
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+// Forgot Password Route
+app.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ error: 'User with this email does not exist' });
+    }
+
+    // Generate verification code
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Set reset token and expiration (1 hour)
+    user.resetPasswordToken = verificationCode;
+    user.resetPasswordExpires = Date.now() + 3600000;
+    await user.save();
+
+    // Send email with verification code using EmailJS
+    await emailjs.send(process.env.EMAILJS_SERVICE_ID, process.env.EMAILJS_TEMPLATE_ID, {
+      email: email,
+      passcode: verificationCode,
+    });
+
+    res.status(200).json({ message: 'Verification code sent to email' });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
+
+// Reset Password Route
+app.post('/reset-password', async (req, res) => {
+  const { email, code, newPassword } = req.body;
+
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: 'Email, verification code, and new password are required' });
+  }
+
+  try {
+    const user = await User.findOne({
+      email,
+      resetPasswordToken: code,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired verification code' });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    res.status(200).json({ message: 'Password has been reset successfully' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
 
 // Register Route
 app.post("/register", async (req, res) => {
@@ -211,37 +306,19 @@ app.post("/register", async (req, res) => {
 
 // Login Route
 app.post("/login", async (req, res) => {
-  const { username, password,recaptchaToken } = req.body;
+  const { username, password } = req.body;
 
-  if (!username || !password || !recaptchaToken) {
-    return res.status(400).json({ error: "Username,password and reCAPTCHA are required" });
+  if (!username || !password) {
+    return res.status(400).json({ error: "Username and password are required" });
   }
-  try {
-    const recaptchaResponse = await axios.post(
-      'https://www.google.com/recaptcha/api/siteverify',
-      null,
-      {
-        params: {
-          secret: '6LdmdCQrAAAAAAINuyE1OZ0n5VIu7nZLUOT0js8f',
-          response: recaptchaToken,
-        },
-      }
-    );
 
-    const { success, score } = recaptchaResponse.data;
-    if (!success) {
-      return res.status(400).json({ error: 'reCAPTCHA verification failed' });
-    }
-  } catch (error) {
-    return res.status(500).json({ error: 'reCAPTCHA verification error: ' + error.message });
-  }
   try {
     const user = await User.findOne({ username });
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    res.cookie('username', username, { httpOnly: false });
+    res.cookie('username', username, { httpOnly: true });
     res.status(200).json({
       message: "Login successful",
       username: user.username,
@@ -260,18 +337,18 @@ app.post("/login", async (req, res) => {
 
 // Logout Route
 app.post("/logout", (req, res) => {
-  res.clearCookie('username', { path: '/' });
+  res.clearCookie('username', { path: '/', httpOnly: true });
   res.status(200).json({ message: "Logout successful" });
 });
 
 // Google Login Endpoint
-const googleClient = new OAuth2Client("423273358250-erqvredg1avk5pr09ugj8uve1rg11m3m.apps.googleusercontent.com");
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
   try {
     const { token } = req.body;
     const ticket = await googleClient.verifyIdToken({
       idToken: token,
-      audience: "423273358250-erqvredg1avk5pr09ugj8uve1rg11m3m.apps.googleusercontent.com",
+      audience: process.env.GOOGLE_CLIENT_ID,
     });
     const payload = ticket.getPayload();
     const { sub: googleId, email, name } = payload;
@@ -318,68 +395,6 @@ app.post('/google-login', async (req, res) => {
   }
 });
 
-// GitHub Login Endpoint
-app.post('/github-login', async (req, res) => {
-  try {
-    const { code } = req.body;
-
-    const tokenResponse = await axios.post('https://github.com/login/oauth/access_token', {
-      client_id: "Ov23liiXOYhc1dxfIBau",
-      client_secret: "54fde01a3e0a2d13c548e1ee038de1754ca5b443",
-      code,
-    }, { headers: { Accept: 'application/json' } });
-
-    const accessToken = tokenResponse.data.access_token;
-    if (!accessToken) {
-      return res.status(400).json({ error: 'Failed to get GitHub access token' });
-    }
-
-    const userResponse = await axios.get('https://api.github.com/user', {
-      headers: { Authorization: `token ${accessToken}` }
-    });
-    const { id: githubId, login: username, email: githubEmail } = userResponse.data;
-
-    let user = await User.findOne({ githubId });
-    if (!user) {
-      const existingUser = await User.findOne({ $or: [{ username }, { email: githubEmail }] });
-      if (existingUser) {
-        if (existingUser.username === username) return res.status(400).json({ error: "GitHub username already exists" });
-        if (existingUser.email === githubEmail) return res.status(400).json({ error: "Email already exists" });
-      }
-
-      user = new User({
-        username,
-        email: githubEmail || `${username}@github.com`,
-        githubId,
-        followUpRequired: false,
-        AppointmentApproved: false,
-        appointments: [],
-        analyses: [],
-        age: null,
-        session: { sessionActive: false, question: '', sessionEnded: false, responses: [], latestAnalysis: null }
-      });
-      await user.save();
-    }
-
-    res.cookie('username', user.username, { httpOnly: true });
-    res.status(200).json({
-      message: "GitHub login successful",
-      username: user.username,
-      email: user.email,
-      avatar: user.avatar,
-      age: user.age,
-      phoneNumber: user.phoneNumber,
-      followUpRequired: user.followUpRequired,
-      AppointmentApproved: user.AppointmentApproved,
-      appointments: user.appointments
-    });
-  } catch (error) {
-    console.error("GitHub login error:", error);
-    res.status(400).json({ error: 'GitHub login failed' });
-  }
-});
-
-// Analyze Audio Route
 app.post("/analyze_audio", upload.single('file'), async (req, res) => {
   const { username } = req.body;
 
@@ -471,7 +486,7 @@ app.post("/generate_pdf", async (req, res) => {
 // Save Analysis Route
 app.post('/save_analysis', async (req, res) => {
   try {
-    const { username,transcriptions, analyses } = req.body;
+    const { username, transcriptions, analyses } = req.body;
 
     if (!username) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -831,7 +846,7 @@ app.post("/api/send-sms", authMiddleware, async (req, res) => {
 
     const message = await client.messages.create({
       body: messageBody,
-      from: '+19479008412',
+      from: process.env.TWILIO_PHONE_NUMBER,
       to: phoneNumber
     });
 
@@ -1146,5 +1161,5 @@ app.post('/api/session/end', authMiddleware, async (req, res) => {
   }
 });
 
-const PORT = 5001;
+const PORT = process.env.PORT1 || 5001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
