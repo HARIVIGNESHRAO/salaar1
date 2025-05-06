@@ -41,8 +41,7 @@ const app = express();
 app.use(express.json());
 app.use(cors({
   origin: true,
-  credentials: true,
-  httpOnly: true
+  credentials: true
 }));
 app.use(cookieParser());
 
@@ -337,7 +336,7 @@ app.post("/login", async (req, res) => {
 
 // Logout Route
 app.post("/logout", (req, res) => {
-  res.clearCookie('username', { path: '/', httpOnly: true });
+  res.clearCookie('username', { path: '/' });
   res.status(200).json({ message: "Logout successful" });
 });
 
@@ -355,11 +354,20 @@ app.post('/google-login', async (req, res) => {
 
     let user = await User.findOne({ googleId });
     if (!user) {
-      const username = email.split('@')[0] + Math.floor(Math.random() * 1000);
-      const existingUser = await User.findOne({ $or: [{ username }, { email }] });
+      // Use the name from Google payload as the username
+      let username = name;
+      // Check for existing username and append a number if it exists
+      let existingUser = await User.findOne({ username });
+      let suffix = 1;
+      while (existingUser) {
+        username = `${name}${suffix}`;
+        existingUser = await User.findOne({ username });
+        suffix++;
+      }
+      // Check for existing email
+      existingUser = await User.findOne({ email });
       if (existingUser) {
-        if (existingUser.username === username) return res.status(400).json({ error: "Derived username already exists" });
-        if (existingUser.email === email) return res.status(400).json({ error: "Email already exists" });
+        return res.status(400).json({ error: "Email already exists" });
       }
 
       user = new User({
@@ -839,10 +847,10 @@ app.post("/api/send-sms", authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user || user.phoneNumber !== phoneNumber.replace('+91', '')) {
-      return res.status(403).json({ error: "Phone number does not match user profile" });
+      return res.status(403).json(  { error: "Phone number does not match user profile" });
     }
 
-    const messageBody = `Hi, just a reminder: you’re set to see Dr. Prashik on ${date} at ${time}`;
+    const messageBody = `Hi,  just a reminder: you’re set to see Dr. Prashik on ${date} at ${time}`;
 
     const message = await client.messages.create({
       body: messageBody,
