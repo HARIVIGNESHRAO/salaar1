@@ -26,7 +26,8 @@ const requiredEnvVars = [
   'EMAILJS_PUBLIC_KEY',
   'EMAILJS_PRIVATE_KEY',
   'EMAILJS_SERVICE_ID',
-  'EMAILJS_TEMPLATE_ID'
+  'EMAILJS_TEMPLATE_ID',
+  'FRONTEND_URL'
 ];
 
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -38,11 +39,15 @@ if (missingEnvVars.length > 0) {
 const app = express();
 
 // Middleware
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
 app.use(express.json());
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
+app.use(cors(corsOptions));
 app.use(cookieParser());
 
 // Initialize EmailJS
@@ -247,27 +252,27 @@ app.post("/register", async (req, res) => {
   const { username, password, email, name, phoneNumber, avatar, age } = req.body;
 
   if (!username || !password || !email) {
-    return res.status(400).json({ error: "Username, password, and email are required" });
+    return res.status(400).json({ error: "Username, bisogna specificare password ed email" });
   }
 
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
-    return res.status(400).json({ error: "Invalid email format" });
+    return res.status(400).json({ error: "Formato email non valido" });
   }
 
   if (phoneNumber && !/^\+?[1-9]\d{1,14}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: "Invalid phone number format" });
+    return res.status(400).json({ error: "Formato numero di telefono non valido" });
   }
 
   if (age && (isNaN(age) || age < 1 || age > 120)) {
-    return res.status(400).json({ error: "Age must be a number between 1 and 120" });
+    return res.status(400).json({ error: "L'età deve essere un numero compreso tra 1 e 120" });
   }
 
   try {
     const existingUser = await User.findOne({ $or: [{ username }, { email }] });
     if (existingUser) {
-      if (existingUser.username === username) return res.status(400).json({ error: "Username already exists" });
-      if (existingUser.email === email) return res.status(400).json({ error: "Email already exists" });
+      if (existingUser.username === username) return res.status(400).json({ error: "Username già esistente" });
+      if (existingUser.email === email) return res.status(400).json({ error: "Email già esistente" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -287,7 +292,7 @@ app.post("/register", async (req, res) => {
     await user.save();
 
     res.status(201).json({
-      message: "Registration successful",
+      message: "Registrazione completata con successo",
       username,
       email,
       name,
@@ -299,7 +304,7 @@ app.post("/register", async (req, res) => {
       appointments: []
     });
   } catch (error) {
-    res.status(500).json({ error: "Server error: " + error.message });
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -308,18 +313,25 @@ app.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
   if (!username || !password) {
-    return res.status(400).json({ error: "Username and password are required" });
+    return res.status(400).json({ error: "Username e password sono richiesti" });
   }
 
   try {
     const user = await User.findOne({ username });
     if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).json({ error: "Invalid username or password" });
+      return res.status(401).json({ error: "Username o password non validi" });
     }
 
-    res.cookie('username', username, { httpOnly: true });
+    res.cookie('username', username, {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'None',
+      path: '/',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+
     res.status(200).json({
-      message: "Login successful",
+      message: "Accesso completato con successo",
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -330,14 +342,14 @@ app.post("/login", async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
-    res.status(500).json({ error: "Server error: " + error.message });
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
 // Logout Route
 app.post("/logout", (req, res) => {
   res.clearCookie('username', { path: '/' });
-  res.status(200).json({ message: "Logout successful" });
+  res.status(200).json({ message: "Logout completato con successo" });
 });
 
 // Google Login Endpoint
@@ -354,20 +366,11 @@ app.post('/google-login', async (req, res) => {
 
     let user = await User.findOne({ googleId });
     if (!user) {
-      // Use the name from Google payload as the username
-      let username = name;
-      // Check for existing username and append a number if it exists
-      let existingUser = await User.findOne({ username });
-      let suffix = 1;
-      while (existingUser) {
-        username = `${name}${suffix}`;
-        existingUser = await User.findOne({ username });
-        suffix++;
-      }
-      // Check for existing email
-      existingUser = await User.findOne({ email });
+      const username = email.split('@')[0] + Math.floor(Math.random() * 1000);
+      const existingUser = await User.findOne({ $or: [{ username }, { email }] });
       if (existingUser) {
-        return res.status(400).json({ error: "Email already exists" });
+        if (existingUser.username === username) return res.status(400).json({ error: "Username derivato già esistente" });
+        if (existingUser.email === email) return res.status(400).json({ error: "Email già esistente" });
       }
 
       user = new User({
@@ -385,9 +388,16 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
-    res.cookie('username', user.username, { httpOnly: true });
+    res.cookie('username', user.username, {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'None',
+      path: '/',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+
     res.status(200).json({
-      message: "Google login successful",
+      message: "Accesso con Google completato con successo",
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -398,8 +408,8 @@ app.post('/google-login', async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
-    console.error("Google login error:", error);
-    res.status(400).json({ error: 'Google login failed' });
+    console.error("Errore accesso con Google:", error);
+    res.status(400).json({ error: 'Accesso con Google fallito' });
   }
 });
 
@@ -407,20 +417,20 @@ app.post("/analyze_audio", upload.single('file'), async (req, res) => {
   const { username } = req.body;
 
   if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded" });
+    return res.status(400).json({ error: "Nessun file caricato" });
   }
 
   if (!username) {
-    return res.status(400).json({ error: "Username is required" });
+    return res.status(400).json({ error: "Username richiesto" });
   }
 
   try {
     const user = await User.findOne({ username });
     if (!user) {
-      return res.status(401).json({ error: "User not found" });
+      return res.status(401).json({ error: "Utente non trovato" });
     }
 
-    const transcription = "Sample transcription from audio";
+    const transcription = "Trascrizione di esempio dall'audio";
     const analysis = analyzeTranscription(transcription);
 
     user.analyses.push({ transcription, analysis });
@@ -441,7 +451,7 @@ app.post("/analyze_audio", upload.single('file'), async (req, res) => {
     if (fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
-    res.status(500).json({ error: "Server error: " + error.message });
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -450,7 +460,7 @@ app.post("/generate_pdf", async (req, res) => {
   const { analysis } = req.body;
 
   if (!analysis) {
-    return res.status(400).json({ error: "Analysis data is required" });
+    return res.status(400).json({ error: "Dati di analisi richiesti" });
   }
 
   try {
@@ -458,36 +468,36 @@ app.post("/generate_pdf", async (req, res) => {
     const filename = `mental_health_report_${Date.now()}.pdf`;
     doc.pipe(fs.createWriteStream(filename));
 
-    doc.fontSize(22).text('Mental Health Analysis Report', { align: 'center' });
-    doc.fontSize(10).text(`Date: ${new Date().toLocaleString()}`, { align: 'left' });
+    doc.fontSize(22).text('Rapporto di Analisi della Salute Mentale', { align: 'center' });
+    doc.fontSize(10).text(`Data: ${new Date().toLocaleString()}`, { align: 'left' });
     doc.moveDown();
 
-    doc.fontSize(14).text('Emotions Identified:');
+    doc.fontSize(14).text('Emozioni Identificate:');
     (analysis.Emotions || []).forEach(emotion => doc.text(`• ${emotion}`));
     doc.moveDown();
 
-    doc.fontSize(14).text('Tones Identified:');
+    doc.fontSize(14).text('Toni Identificati:');
     (analysis.Tones || []).forEach(tone => doc.text(`• ${tone}`));
     doc.moveDown();
 
-    doc.fontSize(14).text('Possible Reasons:');
-    doc.fontSize(10).text(analysis.Reasons || 'Not provided', { align: 'justify' });
+    doc.fontSize(14).text('Possibili Ragioni:');
+    doc.fontSize(10).text(analysis.Reasons || 'Non fornito', { align: 'justify' });
     doc.moveDown();
 
-    doc.fontSize(14).text('Suggestions:');
+    doc.fontSize(14).text('Suggerimenti:');
     (analysis.Suggestions || []).forEach(suggestion => doc.text(`✔ ${suggestion}`));
 
     doc.end();
 
-    res.download(filename, 'Analysis_Report.pdf', (err) => {
+    res.download(filename, 'Rapporto_Analisi.pdf', (err) => {
       if (!err) {
         fs.unlinkSync(filename);
       } else {
-        console.error('Download error:', err);
+        console.error('Errore download:', err);
       }
     });
   } catch (error) {
-    res.status(500).json({ error: "Server error: " + error.message });
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -497,11 +507,11 @@ app.post('/save_analysis', async (req, res) => {
     const { username, transcriptions, analyses } = req.body;
 
     if (!username) {
-      return res.status(401).json({ error: 'User not authenticated' });
+      return res.status(401).json({ error: 'Utente non autenticato' });
     }
 
     if (!transcriptions || !analyses || transcriptions.length !== analyses.length || transcriptions.length === 0) {
-      return res.status(400).json({ error: 'Both transcriptions and analyses are required and must match in length' });
+      return res.status(400).json({ error: 'Trascrizioni e analisi sono richieste e devono corrispondere in lunghezza' });
     }
 
     const analysesToSave = transcriptions.map((transcription, index) => ({
@@ -522,13 +532,13 @@ app.post('/save_analysis', async (req, res) => {
     );
 
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Utente non trovato' });
     }
 
-    res.status(200).json({ message: 'Analyses saved successfully', visits: user.visits });
+    res.status(200).json({ message: 'Analisi salvate con successo', visits: user.visits });
   } catch (error) {
-    console.error('Error saving analyses:', error);
-    res.status(500).json({ error: 'Failed to save analyses' });
+    console.error('Errore salvataggio analisi:', error);
+    res.status(500).json({ error: 'Impossibile salvare le analisi' });
   }
 });
 
@@ -539,34 +549,34 @@ app.post("/users/:username/export-analyses", async (req, res) => {
   try {
     const user = await User.findOne({ username });
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: "Utente non trovato" });
     }
 
     const doc = new PDFDocument();
-    const filename = `all_analyses_${username}_${Date.now()}.pdf`;
+    const filename = `tutte_analisi_${username}_${Date.now()}.pdf`;
     doc.pipe(fs.createWriteStream(filename));
 
-    doc.fontSize(22).text(`All Mental Health Analyses for ${username}`, { align: 'center' });
-    doc.fontSize(10).text(`Generated on: ${new Date().toLocaleString()}`, { align: 'left' });
+    doc.fontSize(22).text(`Tutte le Analisi di Salute Mentale per ${username}`, { align: 'center' });
+    doc.fontSize(10).text(`Generato il: ${new Date().toLocaleString()}`, { align: 'left' });
     doc.moveDown();
 
     user.analyses.forEach((analysis, index) => {
-      doc.fontSize(16).text(`Analysis ${index + 1}`, { underline: true });
+      doc.fontSize(16).text(`Analisi ${index + 1}`, { underline: true });
       doc.moveDown(0.5);
 
-      doc.fontSize(14).text('Transcription:');
-      doc.fontSize(10).text(analysis.transcription || 'Not provided', { align: 'left' });
+      doc.fontSize(14).text('Trascrizione:');
+      doc.fontSize(10).text(analysis.transcription || 'Non fornito', { align: 'left' });
       doc.moveDown();
 
-      doc.fontSize(14).text('Emotions Identified:');
+      doc.fontSize(14).text('Emozioni Identificate:');
       (analysis.analysis.Emotions || []).forEach(emotion => doc.text(`• ${emotion}`));
       doc.moveDown();
 
-      doc.fontSize(14).text('Possible Reasons:');
-      doc.fontSize(10).text(analysis.analysis.Reasons || 'Not provided', { align: 'left' });
+      doc.fontSize(14).text('Possibili Ragioni:');
+      doc.fontSize(10).text(analysis.analysis.Reasons || 'Non fornito', { align: 'left' });
       doc.moveDown();
 
-      doc.fontSize(14).text('Suggestions:');
+      doc.fontSize(14).text('Suggerimenti:');
       (analysis.analysis.Suggestions || []).forEach(suggestion => doc.text(`✔ ${suggestion}`));
       doc.moveDown();
 
@@ -575,17 +585,17 @@ app.post("/users/:username/export-analyses", async (req, res) => {
 
     doc.end();
 
-    res.download(filename, `All_Analyses_${username}.pdf`, (err) => {
+    res.download(filename, `Tutte_Analisi_${username}.pdf`, (err) => {
       if (!err) {
         fs.unlinkSync(filename);
       } else {
-        console.error('Export error:', err);
-        res.status(500).json({ error: "Failed to export analyses" });
+        console.error('Errore esportazione:', err);
+        res.status(500).json({ error: "Impossibile esportare le analisi" });
       }
     });
   } catch (error) {
-    console.error("Export error:", error.message);
-    res.status(500).json({ error: "Server error: " + error.message });
+    console.error("Errore esportazione:", error.message);
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -601,19 +611,19 @@ app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
     if (result.modifiedCount === 0) {
       const user = await User.findOne({ username });
       if (!user) {
-        return res.status(404).json({ success: false, message: "User not found" });
+        return res.status(404).json({ success: false, message: "Utente non trovato" });
       }
       const analysisExists = user.analyses.some(a => a._id.toString() === analysisId);
       if (!analysisExists) {
-        return res.status(404).json({ success: false, message: "Analysis not found" });
+        return res.status(404).json({ success: false, message: "Analisi non trovata" });
       }
-      return res.status(500).json({ success: false, message: "Failed to delete analysis" });
+      return res.status(500).json({ success: false, message: "Impossibile eliminare l'analisi" });
     }
 
-    res.status(200).json({ success: true, message: "Analysis deleted successfully" });
+    res.status(200).json({ success: true, message: "Analisi eliminata con successo" });
   } catch (error) {
-    console.error("Error deleting analysis:", error.message);
-    res.status(500).json({ success: false, message: "Server error: " + error.message });
+    console.error("Errore eliminazione analisi:", error.message);
+    res.status(500).json({ success: false, message: "Errore del server: " + error.message });
   }
 });
 
@@ -625,29 +635,31 @@ app.get("/users", async (req, res) => {
       .lean();
 
     if (!users || users.length === 0) {
-      return res.status(404).json({ message: "No users found" });
+      return res.status(404).json({ message: "Nessun utente trovato" });
     }
 
     res.status(200).json({
-      message: "Users retrieved successfully",
+      message: "Utenti recuperati con successo",
       count: users.length,
       users
     });
   } catch (error) {
-    console.error("Error fetching users:", error.message);
-    res.status(500).json({ error: "Server error: " + error.message });
+    console.error("Errore recupero utenti:", error.message);
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
 // Get User by Username Route
 app.get("/users/username", async (req, res) => {
   try {
+    console.log('Cookies ricevuti:', req.cookies);
     const username = req.cookies.username;
 
     if (!username) {
+      console.log('Nessun cookie username trovato');
       return res.status(401).json({
         success: false,
-        message: "No username found in cookies. Please log in."
+        message: "Nessun username trovato nei cookies. Effettua il login."
       });
     }
 
@@ -658,7 +670,7 @@ app.get("/users/username", async (req, res) => {
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: "User not found"
+        message: "Utente non trovato"
       });
     }
 
@@ -677,10 +689,10 @@ app.get("/users/username", async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching user:', error);
+    console.error('Errore recupero utente:', error);
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Errore del server",
       error: error.message
     });
   }
@@ -692,13 +704,13 @@ app.delete("/users/:id", async (req, res) => {
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ message: "Utente non trovato" });
     }
     await User.deleteOne({ _id: userId });
-    res.status(200).json({ message: "User deleted successfully" });
+    res.status(200).json({ message: "Utente eliminato con successo" });
   } catch (error) {
-    console.error("Error deleting user:", error.message);
-    res.status(500).json({ error: "Server error: " + error.message });
+    console.error("Errore eliminazione utente:", error.message);
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -708,7 +720,7 @@ app.patch("/users/:id", async (req, res) => {
   const { followUpRequired } = req.body;
 
   if (typeof followUpRequired !== 'boolean') {
-    return res.status(400).json({ error: "followUpRequired must be a boolean" });
+    return res.status(400).json({ error: "followUpRequired deve essere un booleano" });
   }
 
   try {
@@ -719,16 +731,16 @@ app.patch("/users/:id", async (req, res) => {
     ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
 
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: "Utente non trovato" });
     }
 
     res.status(200).json({
-      message: "Follow-up status updated successfully",
+      message: "Stato di follow-up aggiornato con successo",
       user
     });
   } catch (error) {
-    console.error("Error updating follow-up status:", error.message);
-    res.status(500).json({ error: "Server error: " + error.message });
+    console.error("Errore aggiornamento stato follow-up:", error.message);
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -740,7 +752,7 @@ app.get("/api/user/profile", authMiddleware, async (req, res) => {
       .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits -_id');
 
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: "Utente non trovato" });
     }
 
     res.status(200).json({
@@ -756,8 +768,8 @@ app.get("/api/user/profile", authMiddleware, async (req, res) => {
       visits: user.visits
     });
   } catch (error) {
-    console.error("Error fetching profile:", error);
-    res.status(500).json({ error: "Server error: " + error.message });
+    console.error("Errore recupero profilo:", error);
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -766,22 +778,22 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
   const { name, email, avatar, age, phoneNumber } = req.body;
 
   if (!name || !email) {
-    return res.status(400).json({ error: "Name and email are required" });
+    return res.status(400).json({ error: "Nome ed email sono richiesti" });
   }
 
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
-    return res.status(400).json({ error: "Invalid email format" });
+    return res.status(400).json({ error: "Formato email non valido" });
   }
 
   if (age && (isNaN(age) || age < 1 || age > 120)) {
-    return res.status(400).json({ error: "Age must be a number between 1 and 120" });
+    return res.status(400).json({ error: "L'età deve essere un numero compreso tra 1 e 120" });
   }
 
   if (phoneNumber) {
     const phoneRegex = /^\+?[\d\s-]{10,}$/;
     if (!phoneRegex.test(phoneNumber)) {
-      return res.status(400).json({ error: "Invalid phone number format" });
+      return res.status(400).json({ error: "Formato numero di telefono non valido" });
     }
   }
 
@@ -791,7 +803,7 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
       username: { $ne: req.user.username }
     });
     if (emailInUse) {
-      return res.status(400).json({ error: "Email already in use" });
+      return res.status(400).json({ error: "Email già in uso" });
     }
 
     if (phoneNumber) {
@@ -800,7 +812,7 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
         username: { $ne: req.user.username }
       });
       if (phoneInUse) {
-        return res.status(400).json({ error: "Phone number already in use" });
+        return res.status(400).json({ error: "Numero di telefono già in uso" });
       }
     }
 
@@ -811,11 +823,11 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
     ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments -_id');
 
     if (!updatedUser) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: "Utente non trovato" });
     }
 
     res.status(200).json({
-      message: "Profile updated successfully",
+      message: "Profilo aggiornato con successo",
       username: updatedUser.username,
       email: updatedUser.email,
       name: updatedUser.name,
@@ -827,8 +839,8 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
       appointments: updatedUser.appointments
     });
   } catch (error) {
-    console.error("Error updating profile:", error);
-    res.status(500).json({ error: "Server error: " + error.message });
+    console.error("Errore aggiornamento profilo:", error);
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -836,21 +848,21 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
 app.post("/api/send-sms", authMiddleware, async (req, res) => {
   const { phoneNumber, date, time } = req.body;
   if (!phoneNumber || !date || !time) {
-    return res.status(400).json({ error: "Phone number, date, and time are required" });
+    return res.status(400).json({ error: "Numero di telefono, data e ora sono richiesti" });
   }
 
   const phoneRegex = /^\+[1-9]\d{1,14}$/;
   if (!phoneRegex.test(phoneNumber)) {
-    return res.status(400).json({ error: "Invalid phone number format. Must include country code (e.g., +91)" });
+    return res.status(400).json({ error: "Formato numero di telefono non valido. Deve includere il prefisso internazionale (es. +39)" });
   }
 
   try {
     const user = await User.findOne({ username: req.user.username });
-    if (!user || user.phoneNumber !== phoneNumber.replace('+91', '')) {
-      return res.status(403).json(  { error: "Phone number does not match user profile" });
+    if (!user || user.phoneNumber !== phoneNumber.replace('+39', '')) {
+      return res.status(403).json({ error: "Il numero di telefono non corrisponde al profilo utente" });
     }
 
-    const messageBody = `Hi,  just a reminder: you’re set to see Dr. Prashik on ${date} at ${time}`;
+    const messageBody = `Ciao, un promemoria: hai un appuntamento con il Dr. Prashik il ${date} alle ${time}`;
 
     const message = await client.messages.create({
       body: messageBody,
@@ -858,11 +870,11 @@ app.post("/api/send-sms", authMiddleware, async (req, res) => {
       to: phoneNumber
     });
 
-    console.log('SMS sent:', message.sid);
-    res.status(200).json({ message: "SMS sent successfully", sid: message.sid });
+    console.log('SMS inviato:', message.sid);
+    res.status(200).json({ message: "SMS inviato con successo", sid: message.sid });
   } catch (error) {
-    console.error("Twilio error:", error);
-    res.status(500).json({ error: "Failed to send SMS", details: error.message });
+    console.error("Errore Twilio:", error);
+    res.status(500).json({ error: "Impossibile inviare SMS", details: error.message });
   }
 });
 
@@ -871,7 +883,7 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
   const { date, time, doctor } = req.body;
 
   if (!date || !time || !doctor) {
-    return res.status(400).json({ error: "Date, time, and doctor are required" });
+    return res.status(400).json({ error: "Data, ora e medico sono richiesti" });
   }
 
   try {
@@ -892,11 +904,11 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
     ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
 
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: "Utente non trovato" });
     }
 
     res.status(200).json({
-      message: "Appointment approved and saved successfully",
+      message: "Appuntamento approvato e salvato con successo",
       user: {
         username: user.username,
         email: user.email,
@@ -907,8 +919,8 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Error approving appointment:", error);
-    res.status(500).json({ error: "Server error: " + error.message });
+    console.error("Errore approvazione appuntamento:", error);
+    res.status(500).json({ error: "Errore del server: " + error.message });
   }
 });
 
@@ -919,7 +931,7 @@ app.get('/api/session/active', authMiddleware, async (req, res) => {
     const user = await User.findOne({ username: req.user.username })
       .select('session');
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Utente non trovato' });
     }
     res.status(200).json({
       active: user.session.sessionActive,
@@ -927,8 +939,8 @@ app.get('/api/session/active', authMiddleware, async (req, res) => {
       sessionEnded: user.session.sessionEnded
     });
   } catch (error) {
-    console.error('Error fetching session:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Errore recupero sessione:', error);
+    res.status(500).json({ error: 'Errore del server: ' + error.message });
   }
 });
 
@@ -937,13 +949,13 @@ app.post('/api/session/start', authMiddleware, async (req, res) => {
   const { userId, question } = req.body;
 
   if (!userId || !question) {
-    return res.status(400).json({ error: 'User ID and question are required' });
+    return res.status(400).json({ error: 'ID utente e domanda sono richiesti' });
   }
 
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Utente non trovato' });
     }
 
     const updatedUser = await User.findByIdAndUpdate(
@@ -962,14 +974,14 @@ app.post('/api/session/start', authMiddleware, async (req, res) => {
     );
 
     if (!updatedUser) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Utente non trovato' });
     }
 
-    console.log(`Session started for user ${userId} with question: ${question}`);
-    res.status(200).json({ message: 'Session started' });
+    console.log(`Sessione avviata per l'utente ${userId} con domanda: ${question}`);
+    res.status(200).json({ message: 'Sessione avviata' });
   } catch (error) {
-    console.error('Error starting session:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Erro überall starten der Sitzung:', error);
+    res.status(500).json({ error: 'Serverfehler: ' + error.message });
   }
 });
 
@@ -978,29 +990,29 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
   const { question, language } = req.body;
 
   if (!req.file) {
-    return res.status(400).json({ error: 'Audio file is required' });
+    return res.status(400).json({ error: 'Datei audio erforderlich' });
   }
 
   if (!question || !language) {
-    return res.status(400).json({ error: 'Question and language are required' });
+    return res.status(400).json({ error: 'Frage und Sprache erforderlich' });
   }
 
   try {
     const user = await User.findOne({ username: req.user.username });
     if (!user) {
       fs.unlinkSync(req.file.path);
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Benutzer nicht gefunden' });
     }
 
     if (!user.session.sessionActive || user.session.question !== question) {
       fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'No active session or invalid question' });
+      return res.status(400).json({ error: 'Keine aktive Sitzung oder ungültige Frage' });
     }
 
-    // Check if response already exists
+    // Überprüfen, ob bereits eine Antwort existiert
     if (user.session.responses.length > 0) {
       fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'Response already recorded for this session' });
+      return res.status(400).json({ error: 'Antwort für diese Sitzung bereits aufgezeichnet' });
     }
 
     const response = {
@@ -1013,13 +1025,13 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
     user.session.responses.push(response);
     await user.save();
 
-    res.status(200).json({ message: 'Response recorded successfully' });
+    res.status(200).json({ message: 'Antwort erfolgreich aufgezeichnet' });
   } catch (error) {
     if (fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
-    console.error('Error recording response:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Fehler bei der Aufzeichnung der Antwort:', error);
+    res.status(500).json({ error: 'Serverfehler: ' + error.message });
   }
 });
 
@@ -1030,11 +1042,11 @@ app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Benutzer nicht gefunden' });
     }
 
     if (!user.session.sessionActive) {
-      return res.status(400).json({ error: 'No active session for this user' });
+      return res.status(400).json({ error: 'Keine aktive Sitzung für diesen Benutzer' });
     }
 
     const responses = user.session.responses.map(response => ({
@@ -1046,8 +1058,8 @@ app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
 
     res.status(200).json({ responses });
   } catch (error) {
-    console.error('Error fetching session responses:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Fehler beim Abrufen der Sitzungsantworten:', error);
+    res.status(500).json({ error: 'Serverfehler: ' + error.message });
   }
 });
 
@@ -1056,16 +1068,16 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
   const { userId, analysis } = req.body;
 
   if (!userId || !analysis) {
-    return res.status(400).json({ error: 'User ID and analysis data are required' });
+    return res.status(400).json({ error: 'Benutzer-ID und Analysedaten erforderlich' });
   }
 
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Benutzer nicht gefunden' });
     }
 
-    // Save analysis to session
+    // Analyse in der Sitzung speichern
     user.session.latestAnalysis = {
       transcriptions: analysis.transcriptions,
       individual_analyses: analysis.individual_analyses,
@@ -1073,7 +1085,7 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
       createdAt: new Date()
     };
 
-    // Save transcriptions and analyses to user's analyses
+    // Transkripte und Analysen in den Analysen des Benutzers speichern
     const analysesToSave = analysis.transcriptions.map((transcription, index) => ({
       transcription: transcription.text,
       analysis: analysis.individual_analyses[index],
@@ -1083,7 +1095,7 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
     user.analyses.push(...analysesToSave);
     user.visits += 1;
 
-    // Clean up response audio files
+    // Antwort-Audiodateien bereinigen
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
         fs.unlinkSync(response.audioPath);
@@ -1093,10 +1105,10 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
     user.session.responses = [];
     await user.save();
 
-    res.status(200).json({ message: 'Analysis saved successfully' });
+    res.status(200).json({ message: 'Analyse erfolgreich gespeichert' });
   } catch (error) {
-    console.error('Error saving session analysis:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Fehler beim Speichern der Sitzungsanalyse:', error);
+    res.status(500).json({ error: 'Serverfehler: ' + error.message });
   }
 });
 
@@ -1106,15 +1118,15 @@ app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
     const user = await User.findOne({ username: req.user.username })
       .select('session.latestAnalysis');
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Benutzer nicht gefunden' });
     }
 
     res.status(200).json({
       analysis: user.session.latestAnalysis
     });
   } catch (error) {
-    console.error('Error fetching latest analysis:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Fehler beim Abrufen der neuesten Analyse:', error);
+    res.status(500).json({ error: 'Serverfehler: ' + error.message });
   }
 });
 
@@ -1123,20 +1135,20 @@ app.post('/api/session/end', authMiddleware, async (req, res) => {
   const { userId } = req.body;
 
   if (!userId) {
-    return res.status(400).json({ error: 'User ID is required' });
+    return res.status(400).json({ error: 'Benutzer-ID erforderlich' });
   }
 
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Benutzer nicht gefunden' });
     }
 
     if (!user.session.sessionActive) {
-      return res.status(400).json({ error: 'No active session for this user' });
+      return res.status(400).json({ error: 'Keine aktive Sitzung für diesen Benutzer' });
     }
 
-    // Clean up response audio files
+    // Antwort-Audiodateien bereinigen
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
         fs.unlinkSync(response.audioPath);
@@ -1158,16 +1170,16 @@ app.post('/api/session/end', authMiddleware, async (req, res) => {
     );
 
     if (!updatedUser) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Benutzer nicht gefunden' });
     }
 
-    console.log(`Session ended for user ${userId}`);
-    res.status(200).json({ message: 'Session ended' });
+    console.log(`Sitzung für Benutzer ${userId} beendet`);
+    res.status(200).json({ message: 'Sitzung beendet' });
   } catch (error) {
-    console.error('Error ending session:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Fehler beim Beenden der Sitzung:', error);
+    res.status(500).json({ error: 'Serverfehler: ' + error.message });
   }
 });
 
 const PORT = process.env.PORT1 || 5001;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server läuft auf Port ${PORT}`));
