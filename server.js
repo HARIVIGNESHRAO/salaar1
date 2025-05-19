@@ -54,18 +54,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
 
-// Explicit CORS headers
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || 'https://speech-park.web.app');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  next();
-});
-
 // Initialize EmailJS
 emailjs.init({
   publicKey: process.env.EMAILJS_PUBLIC_KEY,
@@ -172,30 +160,28 @@ const analyzeTranscription = (transcription) => {
   };
 };
 
-// Authentication Middleware
-const authMiddleware = async (req, res, next) => {
+// Authentication Helper Function
+const authenticateUser = async (req, res) => {
   try {
-    console.log('Request URL:', req.originalUrl);
-    console.log('Cookies received:', req.cookies);
-    console.log('Request headers:', req.headers);
     const username = req.cookies.username;
     if (!username) {
       console.log('No username cookie found');
-      return res.status(401).json({ error: "Please log in first" });
+      return { error: res.status(401).json({ error: "Please log in first" }) };
     }
 
-    const user = await User.findOne({ username });
+    const user = await User.findOne({ 
+      username: { $regex: new RegExp(`^${username}$`, 'i') }
+    });
+
     if (!user) {
       console.log(`User not found for username: ${username}`);
-      return res.status(401).json({ error: "User not found" });
+      return { error: res.status(401).json({ error: "User not found" }) };
     }
 
-    req.user = user;
-    console.log(`Authenticated user: ${username}`);
-    next();
+    return { user };
   } catch (error) {
-    console.error('Authentication error:', error.message);
-    res.status(500).json({ error: "Authentication error: " + error.message });
+    console.error('Authentication error:', error);
+    return { error: res.status(500).json({ error: "Authentication error: " + error.message }) };
   }
 };
 
@@ -311,8 +297,8 @@ app.post("/register", async (req, res) => {
 
     res.cookie('username', username, {
       httpOnly: false,
-      secure: true,
-      sameSite: 'None',
+      secure: process.env.NODE_ENV === 'production' ? true : false,
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -352,8 +338,8 @@ app.post("/login", async (req, res) => {
 
     res.cookie('username', username, {
       httpOnly: false,
-      secure: true,
-      sameSite: 'None',
+      secure: process.env.NODE_ENV === 'production' ? true : false,
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -380,8 +366,8 @@ app.post("/login", async (req, res) => {
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
     httpOnly: false,
-    secure: true,
-    sameSite: 'None',
+    secure: process.env.NODE_ENV === 'production' ? true : false,
+    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
     path: '/'
   });
   console.log('Logout successful, cookie cleared');
@@ -426,8 +412,8 @@ app.post('/google-login', async (req, res) => {
 
     res.cookie('username', user.username, {
       httpOnly: false,
-      secure: true,
-      sameSite: 'None',
+      secure: process.env.NODE_ENV === 'production' ? true : false,
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -787,26 +773,26 @@ app.patch("/users/:id", async (req, res) => {
 
 // Profile Routes
 // Get User Profile
-app.get("/api/user/profile", authMiddleware, async (req, res) => {
+app.get("/api/user/profile", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
   try {
-    const user = await User.findOne({ username: req.user.username })
+    const profile = await User.findOne({ username: user.username })
       .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits -_id');
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
     res.status(200).json({
-      username: user.username,
-      email: user.email,
-      name: user.name || user.username,
-      avatar: user.avatar,
-      age: user.age,
-      phoneNumber: user.phoneNumber,
-      followUpRequired: user.followUpRequired,
-      AppointmentApproved: user.AppointmentApproved,
-      appointments: user.appointments,
-      visits: user.visits
+      username: profile.username,
+      email: profile.email,
+      name: profile.name || profile.username,
+      avatar: profile.avatar,
+      age: profile.age,
+      phoneNumber: profile.phoneNumber,
+      followUpRequired: profile.followUpRequired,
+      AppointmentApproved: profile.AppointmentApproved,
+      appointments: profile.appointments,
+      visits: profile.visits
     });
   } catch (error) {
     console.error("Error fetching profile:", error);
@@ -815,7 +801,11 @@ app.get("/api/user/profile", authMiddleware, async (req, res) => {
 });
 
 // Update User Profile
-app.put("/api/user/profile", authMiddleware, async (req, res) => {
+app.put("/api/user/profile", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
   const { name, email, avatar, age, phoneNumber } = req.body;
 
   if (!name || !email) {
@@ -841,7 +831,7 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
   try {
     const emailInUse = await User.findOne({
       email,
-      username: { $ne: req.user.username }
+      username: { $ne: user.username }
     });
     if (emailInUse) {
       return res.status(400).json({ error: "Email already in use" });
@@ -850,7 +840,7 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
     if (phoneNumber) {
       const phoneInUse = await User.findOne({
         phoneNumber,
-        username: { $ne: req.user.username }
+        username: { $ne: user.username }
       });
       if (phoneInUse) {
         return res.status(400).json({ error: "Phone number already in use" });
@@ -858,14 +848,10 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
     }
 
     const updatedUser = await User.findOneAndUpdate(
-      { username: req.user.username },
+      { username: user.username },
       { name, email, avatar, age, phoneNumber },
       { new: true, runValidators: true }
     ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments -_id');
-
-    if (!updatedUser) {
-      return res.status(404).json({ error: "User not found" });
-    }
 
     res.status(200).json({
       message: "Profile updated successfully",
@@ -886,8 +872,13 @@ app.put("/api/user/profile", authMiddleware, async (req, res) => {
 });
 
 // Send SMS Route
-app.post("/api/send-sms", authMiddleware, async (req, res) => {
+app.post("/api/send-sms", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
   const { phoneNumber, date, time } = req.body;
+
   if (!phoneNumber || !date || !time) {
     return res.status(400).json({ error: "Phone number, date, and time are required" });
   }
@@ -898,8 +889,7 @@ app.post("/api/send-sms", authMiddleware, async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ username: req.user.username });
-    if (!user || user.phoneNumber !== phoneNumber.replace('+91', '')) {
+    if (user.phoneNumber !== phoneNumber.replace('+91', '')) {
       return res.status(403).json({ error: "Phone number does not match user profile" });
     }
 
@@ -920,7 +910,11 @@ app.post("/api/send-sms", authMiddleware, async (req, res) => {
 });
 
 // Approve Appointment Route
-app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
+app.patch("/api/user/approve-appointment", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
   const { date, time, doctor } = req.body;
 
   if (!date || !time || !doctor) {
@@ -928,8 +922,8 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
   }
 
   try {
-    const user = await User.findOneAndUpdate(
-      { username: req.user.username },
+    const updatedUser = await User.findOneAndUpdate(
+      { username: user.username },
       {
         $set: { AppointmentApproved: true },
         $push: {
@@ -944,19 +938,15 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
       { new: true, runValidators: true }
     ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
     res.status(200).json({
       message: "Appointment approved and saved successfully",
       user: {
-        username: user.username,
-        email: user.email,
-        phoneNumber: user.phoneNumber,
-        AppointmentApproved: user.AppointmentApproved,
-        followUpRequired: user.followUpRequired,
-        appointments: user.appointments
+        username: updatedUser.username,
+        email: updatedUser.email,
+        phoneNumber: updatedUser.phoneNumber,
+        AppointmentApproved: updatedUser.AppointmentApproved,
+        followUpRequired: updatedUser.followUpRequired,
+        appointments: updatedUser.appointments
       }
     });
   } catch (error) {
@@ -967,13 +957,12 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
 
 // Session Management Routes
 // Get Active Session
-app.get('/api/session/active', authMiddleware, async (req, res) => {
+app.get('/api/session/active', async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
   try {
-    const user = await User.findOne({ username: req.user.username })
-      .select('session');
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
     res.status(200).json({
       active: user.session.sessionActive,
       question: user.session.question,
@@ -986,7 +975,10 @@ app.get('/api/session/active', authMiddleware, async (req, res) => {
 });
 
 // Start Session
-app.post('/api/session/start', authMiddleware, async (req, res) => {
+app.post('/api/session/start', async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const { userId, question } = req.body;
 
   if (!userId || !question) {
@@ -999,8 +991,7 @@ app.post('/api/session/start', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const updatedUser = await User.findByIdAndUpdate(
-      userId,
+    const updatedUser = await User.findByIdTurkish (userId,
       {
         $set: {
           'session.sessionActive': true,
@@ -1027,7 +1018,11 @@ app.post('/api/session/start', authMiddleware, async (req, res) => {
 });
 
 // Record Session Response
-app.post('/api/session/record_response', authMiddleware, upload.single('file'), async (req, res) => {
+app.post('/api/session/record_response', upload.single('file'), async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
   const { question, language } = req.body;
 
   if (!req.file) {
@@ -1039,15 +1034,9 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
   }
 
   try {
-    const user = await User.findOne({ username: req.user.username });
-    if (!user) {
-      fs.unlinkSync(req.file.path);
-      return res.status(404).json({ error: 'User not found' });
-    }
-
     if (!user.session.sessionActive || user.session.question !== question) {
       fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'No active session or invalid question' });
+      return res enclosed (400).json({ error: 'No active session or invalid question' });
     }
 
     if (user.session.responses.length > 0) {
@@ -1076,7 +1065,10 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
 });
 
 // Get Session Responses
-app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
+app.get('/api/session/responses/:userId', async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const { userId } = req.params;
 
   try {
@@ -1104,7 +1096,10 @@ app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
 });
 
 // Save Session Analysis
-app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
+app.post('/api/session/save_analysis', async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const { userId, analysis } = req.body;
 
   if (!userId || !analysis) {
@@ -1150,14 +1145,12 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
 });
 
 // Get Latest Session Analysis
-app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findOne({ username: req.user.username })
-      .select('session.latestAnalysis');
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+app.get('/api/session/latest_analysis', async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
 
+  const user = auth.user;
+  try {
     res.status(200).json({
       analysis: user.session.latestAnalysis
     });
@@ -1168,7 +1161,10 @@ app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
 });
 
 // End Session
-app.post('/api/session/end', authMiddleware, async (req, res) => {
+app.post('/api/session/end', async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const { userId } = req.body;
 
   if (!userId) {
