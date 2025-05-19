@@ -369,7 +369,7 @@ app.post("/logout", (req, res) => {
     sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
     path: '/'
   });
-  res.status(200).json({ message:部分2: "Logout successful" });
+  res.status(200).json({ message: "Logout successful" });
 });
 
 // Updated Google Login Endpoint
