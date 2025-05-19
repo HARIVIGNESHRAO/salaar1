@@ -42,13 +42,29 @@ const app = express();
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
-app.use(cors({
-  origin: 'https://speech-park.web.app',
-  credentials: true
-}));
 
 // Trust Render's proxy for secure cookies
 app.set('trust proxy', 1);
+
+// CORS configuration
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'https://speech-park.web.app',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
+}));
+
+// Explicit CORS headers
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || 'https://speech-park.web.app');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
 // Initialize EmailJS
 emailjs.init({
@@ -64,7 +80,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   .then(() => console.log("Connected to MongoDB Atlas"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// Updated User Schema
+// User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String },
@@ -157,10 +173,11 @@ const analyzeTranscription = (transcription) => {
 };
 
 // Authentication Middleware
-// Updated Authentication Middleware with Debugging
 const authMiddleware = async (req, res, next) => {
   try {
-    console.log('Cookies received:', req.cookies); // Debug cookies
+    console.log('Request URL:', req.originalUrl);
+    console.log('Cookies received:', req.cookies);
+    console.log('Request headers:', req.headers);
     const username = req.cookies.username;
     if (!username) {
       console.log('No username cookie found');
@@ -174,6 +191,7 @@ const authMiddleware = async (req, res, next) => {
     }
 
     req.user = user;
+    console.log(`Authenticated user: ${username}`);
     next();
   } catch (error) {
     console.error('Authentication error:', error.message);
@@ -198,15 +216,11 @@ app.post('/forgot-password', async (req, res) => {
       return res.status(404).json({ error: 'User with this email does not exist' });
     }
 
-    // Generate verification code
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // Set reset token and expiration (1 hour)
     user.resetPasswordToken = verificationCode;
     user.resetPasswordExpires = Date.now() + 3600000;
     await user.save();
 
-    // Send email with verification code using EmailJS
     await emailjs.send(process.env.EMAILJS_SERVICE_ID, process.env.EMAILJS_TEMPLATE_ID, {
       email: email,
       passcode: verificationCode,
@@ -238,7 +252,6 @@ app.post('/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Invalid or expired verification code' });
     }
 
-    // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedPassword;
     user.resetPasswordToken = undefined;
@@ -300,10 +313,11 @@ app.post("/register", async (req, res) => {
       httpOnly: false,
       secure: true,
       sameSite: 'None',
-      domain: process.env.BACKEND_DOMAIN || 'salaar1.onrender.com',
-      maxAge: 24 * 60 * 60 * 1000 // 1 day
+      path: '/',
+      maxAge: 24 * 60 * 60 * 1000
     });
 
+    console.log(`Register successful for ${username}, cookie set`);
     res.status(201).json({
       message: "Registration successful",
       username,
@@ -317,6 +331,7 @@ app.post("/register", async (req, res) => {
       appointments: []
     });
   } catch (error) {
+    console.error('Register error:', error.message);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
@@ -335,15 +350,15 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    // Set cookie with secure attributes
     res.cookie('username', username, {
-      httpOnly: false, // Needed for client-side access
-      secure: process.env.NODE_ENV === 'production', // Secure in production (HTTPS)
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // None for cross-origin in production
+      httpOnly: false,
+      secure: true,
+      sameSite: 'None',
       path: '/',
-      maxAge: 24 * 60 * 60 * 1000 // 1 day
+      maxAge: 24 * 60 * 60 * 1000
     });
 
+    console.log(`Login successful for ${username}, cookie set`);
     res.status(200).json({
       message: "Login successful",
       username: user.username,
@@ -361,18 +376,19 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// Updated Logout Route
+// Logout Route
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
     httpOnly: false,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+    secure: true,
+    sameSite: 'None',
     path: '/'
   });
+  console.log('Logout successful, cookie cleared');
   res.status(200).json({ message: "Logout successful" });
 });
 
-// Updated Google Login Endpoint
+// Google Login Endpoint
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
   try {
@@ -410,12 +426,13 @@ app.post('/google-login', async (req, res) => {
 
     res.cookie('username', user.username, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      secure: true,
+      sameSite: 'None',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
 
+    console.log(`Google login successful for ${user.username}, cookie set`);
     res.status(200).json({
       message: "Google login successful",
       username: user.username,
@@ -433,6 +450,7 @@ app.post('/google-login', async (req, res) => {
   }
 });
 
+// Analyze Audio Route
 app.post("/analyze_audio", upload.single('file'), async (req, res) => {
   const { username } = req.body;
 
@@ -672,10 +690,13 @@ app.get("/users", async (req, res) => {
 // Get User by Username Route
 app.get("/users/username", async (req, res) => {
   try {
+    console.log('Request headers for /users/username:', req.headers);
+    console.log('Cookies for /users/username:', req.cookies);
     const username = req.cookies.username;
-    console.log('Fetching user with username from cookie:', username); // Debug log
+    console.log('Fetching user with username from cookie:', username);
 
     if (!username) {
+      console.log('No username cookie found in /users/username');
       return res.status(401).json({
         success: false,
         message: "No username found in cookies. Please log in."
@@ -687,6 +708,7 @@ app.get("/users/username", async (req, res) => {
     }).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
 
     if (!user) {
+      console.log(`User not found for username: ${username}`);
       return res.status(404).json({
         success: false,
         message: "User not found"
@@ -708,7 +730,7 @@ app.get("/users/username", async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching user:', error);
+    console.error('Error fetching user:', error.message);
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -1028,7 +1050,6 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
       return res.status(400).json({ error: 'No active session or invalid question' });
     }
 
-    // Check if response already exists
     if (user.session.responses.length > 0) {
       fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'Response already recorded for this session' });
@@ -1096,7 +1117,6 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Save analysis to session
     user.session.latestAnalysis = {
       transcriptions: analysis.transcriptions,
       individual_analyses: analysis.individual_analyses,
@@ -1104,7 +1124,6 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
       createdAt: new Date()
     };
 
-    // Save transcriptions and analyses to user's analyses
     const analysesToSave = analysis.transcriptions.map((transcription, index) => ({
       transcription: transcription.text,
       analysis: analysis.individual_analyses[index],
@@ -1114,7 +1133,6 @@ app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
     user.analyses.push(...analysesToSave);
     user.visits += 1;
 
-    // Clean up response audio files
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
         fs.unlinkSync(response.audioPath);
@@ -1167,7 +1185,6 @@ app.post('/api/session/end', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'No active session for this user' });
     }
 
-    // Clean up response audio files
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
         fs.unlinkSync(response.audioPath);
