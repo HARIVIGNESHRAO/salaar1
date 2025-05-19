@@ -157,25 +157,26 @@ const analyzeTranscription = (transcription) => {
 };
 
 // Authentication Middleware
+// Updated Authentication Middleware with Debugging
 const authMiddleware = async (req, res, next) => {
   try {
+    console.log('Cookies received:', req.cookies); // Debug cookies
     const username = req.cookies.username;
-    console.log('Cookies received:', req.cookies); // Debug log
     if (!username) {
-      console.error('No username in cookies');
+      console.log('No username cookie found');
       return res.status(401).json({ error: "Please log in first" });
     }
 
     const user = await User.findOne({ username });
     if (!user) {
-      console.error('User not found for username:', username);
+      console.log(`User not found for username: ${username}`);
       return res.status(401).json({ error: "User not found" });
     }
 
     req.user = user;
     next();
   } catch (error) {
-    console.error('Authentication error:', error);
+    console.error('Authentication error:', error.message);
     res.status(500).json({ error: "Authentication error: " + error.message });
   }
 };
@@ -334,11 +335,12 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
+    // Set cookie with secure attributes
     res.cookie('username', username, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'None',
-      domain: process.env.BACKEND_DOMAIN || 'salaar1.onrender.com',
+      httpOnly: false, // Needed for client-side access
+      secure: process.env.NODE_ENV === 'production', // Secure in production (HTTPS)
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // None for cross-origin in production
+      path: '/',
       maxAge: 24 * 60 * 60 * 1000 // 1 day
     });
 
@@ -354,22 +356,23 @@ app.post("/login", async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
+    console.error('Login error:', error.message);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
-// Logout Route
+// Updated Logout Route
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'None',
-    domain: process.env.BACKEND_DOMAIN || 'salaar1.onrender.com'
+    httpOnly: false,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+    path: '/'
   });
-  res.status(200).json({ message: "Logout successful" });
+  res.status(200).json({ message:部分2: "Logout successful" });
 });
 
-// Google Login Endpoint
+// Updated Google Login Endpoint
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
   try {
@@ -406,11 +409,11 @@ app.post('/google-login', async (req, res) => {
     }
 
     res.cookie('username', user.username, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'None',
-      domain: process.env.BACKEND_DOMAIN || 'salaar1.onrender.com',
-      maxAge: 24 * 60 * 60 * 1000 // 1 day
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      path: '/',
+      maxAge: 24 * 60 * 60 * 1000
     });
 
     res.status(200).json({
