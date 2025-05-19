@@ -437,93 +437,6 @@ app.post('/google-login', async (req, res) => {
 });
 
 // Analyze Audio Route
-app.post("/analyze_audio", upload.single('file'), async (req, res) => {
-  const { username } = req.body;
-
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded" });
-  }
-
-  if (!username) {
-    return res.status(400).json({ error: "Username is required" });
-  }
-
-  try {
-    const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(401).json({ error: "User not found" });
-    }
-
-    const transcription = "Sample transcription from audio";
-    const analysis = analyzeTranscription(transcription);
-
-    user.analyses.push({ transcription, analysis });
-    await user.save();
-
-    fs.unlinkSync(req.file.path);
-
-    res.json({
-      username,
-      email: user.email,
-      transcription,
-      analysis,
-      followUpRequired: user.followUpRequired,
-      AppointmentApproved: user.AppointmentApproved,
-      appointments: user.appointments
-    });
-  } catch (error) {
-    if (fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    res.status(500).json({ error: "Server error: " + error.message });
-  }
-});
-
-// Generate PDF Route
-app.post("/generate_pdf", async (req, res) => {
-  const { analysis } = req.body;
-
-  if (!analysis) {
-    return res.status(400).json({ error: "Analysis data is required" });
-  }
-
-  try {
-    const doc = new PDFDocument();
-    const filename = `mental_health_report_${Date.now()}.pdf`;
-    doc.pipe(fs.createWriteStream(filename));
-
-    doc.fontSize(22).text('Mental Health Analysis Report', { align: 'center' });
-    doc.fontSize(10).text(`Date: ${new Date().toLocaleString()}`, { align: 'left' });
-    doc.moveDown();
-
-    doc.fontSize(14).text('Emotions Identified:');
-    (analysis.Emotions || []).forEach(emotion => doc.text(`• ${emotion}`));
-    doc.moveDown();
-
-    doc.fontSize(14).text('Tones Identified:');
-    (analysis.Tones || []).forEach(tone => doc.text(`• ${tone}`));
-    doc.moveDown();
-
-    doc.fontSize(14).text('Possible Reasons:');
-    doc.fontSize(10).text(analysis.Reasons || 'Not provided', { align: 'justify' });
-    doc.moveDown();
-
-    doc.fontSize(14).text('Suggestions:');
-    (analysis.Suggestions || []).forEach(suggestion => doc.text(`✔ ${suggestion}`));
-
-    doc.end();
-
-    res.download(filename, 'Analysis_Report.pdf', (err) => {
-      if (!err) {
-        fs.unlinkSync(filename);
-      } else {
-        console.error('Download error:', err);
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: "Server error: " + error.message });
-  }
-});
 
 // Save Analysis Route
 app.post('/save_analysis', async (req, res) => {
@@ -1036,7 +949,7 @@ app.post('/api/session/record_response', upload.single('file'), async (req, res)
   try {
     if (!user.session.sessionActive || user.session.question !== question) {
       fs.unlinkSync(req.file.path);
-      return res enclosed (400).json({ error: 'No active session or invalid question' });
+      return res.status(400).json({ error: 'No active session or invalid question' });
     }
 
     if (user.session.responses.length > 0) {
