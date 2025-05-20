@@ -11,6 +11,7 @@ const axios = require('axios');
 const { OAuth2Client } = require('google-auth-library');
 const twilio = require('twilio');
 const emailjs = require('@emailjs/nodejs');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const { exec } = require('child_process');
 const util = require('util');
@@ -28,7 +29,8 @@ const requiredEnvVars = [
   'EMAILJS_SERVICE_ID',
   'EMAILJS_TEMPLATE_ID',
   'FRONTEND_URL',
-  'BACKEND_DOMAIN'
+  'BACKEND_DOMAIN',
+  'JWT_SECRET'
 ];
 
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -171,27 +173,35 @@ const analyzeTranscription = (transcription) => {
 // Authentication Helper Function
 const authenticateUser = async (req, res) => {
   console.log('Authenticating for URL:', req.url);
-  console.log('Cookies received:', req.cookies);
+  console.log('Headers:', req.headers);
+
   try {
-    const username = req.cookies.username;
-    if (!username) {
-      console.log('No username cookie found');
-      return { error: res.status(401).json({ error: "Please log in first" }) };
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('No valid JWT token provided');
+      return { error: res.status(401).json({ error: 'Please provide a valid token' }) };
     }
 
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
     const user = await User.findOne({ 
-      username: { $regex: new RegExp(`^${username}$`, 'i') }
+      username: { $regex: new RegExp(`^${decoded.username}$`, 'i') }
     });
 
     if (!user) {
-      console.log(`User not found for username: ${username}`);
-      return { error: res.status(401).json({ error: "User not found" }) };
+      console.log(`User not found for username: ${decoded.username}`);
+      return { error: res.status(401).json({ error: 'User not found' }) };
     }
 
+    req.user = user;
     return { user };
   } catch (error) {
-    console.error('Authentication error:', error);
-    return { error: res.status(500).json({ error: "Authentication error: " + error.message }) };
+    console.error('Authentication error:', error.message);
+    if (error.name === 'TokenExpiredError') {
+      return { error: res.status(401).json({ error: 'Token expired' }) };
+    }
+    return { error: res.status(401).json({ error: 'Invalid token' }) };
   }
 };
 
@@ -305,6 +315,14 @@ app.post("/register", async (req, res) => {
     });
     await user.save();
 
+    // Generate JWT
+    const token = jwt.sign(
+      { username: user.username, id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+
+    // Set cookie for non-auth purposes
     res.cookie('username', username, {
       httpOnly: false,
       secure: true,
@@ -313,9 +331,10 @@ app.post("/register", async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Register successful for ${username}, cookie set`);
+    console.log(`Register successful for ${username}, JWT issued and cookie set`);
     res.status(201).json({
       message: "Registration successful",
+      token,
       username,
       email,
       name,
@@ -346,6 +365,14 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
+    // Generate JWT
+    const token = jwt.sign(
+      { username: user.username, id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+
+    // Set cookie for non-auth purposes
     res.cookie('username', username, {
       httpOnly: false,
       secure: true,
@@ -354,9 +381,10 @@ app.post("/login", async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Login successful for ${username}, cookie set`);
+    console.log(`Login successful for ${username}, JWT issued and cookie set`);
     res.status(200).json({
       message: "Login successful",
+      token,
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -381,7 +409,7 @@ app.post("/logout", (req, res) => {
     path: '/'
   });
   console.log('Logout successful, cookie cleared');
-  res.status(200).json({ message: "Logout successful" });
+  res.status(200).json({ message: "Logout successful. Please discard your JWT token." });
 });
 
 // Google Login Endpoint
@@ -420,6 +448,14 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
+    // Generate JWT
+    const jwtToken = jwt.sign(
+      { username: user.username, id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+
+    // Set cookie for non-auth purposes
     res.cookie('username', user.username, {
       httpOnly: false,
       secure: true,
@@ -428,9 +464,10 @@ app.post('/google-login', async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Google login successful for ${user.username}, cookie set`);
+    console.log(`Google login successful for ${user.username}, JWT issued and cookie set`);
     res.status(200).json({
       message: "Google login successful",
+      token: jwtToken,
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -448,6 +485,9 @@ app.post('/google-login', async (req, res) => {
 
 // Save Analysis Route
 app.post('/save_analysis', async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   try {
     const { username, transcriptions, analyses } = req.body;
 
@@ -489,6 +529,9 @@ app.post('/save_analysis', async (req, res) => {
 
 // Export All Analyses Route
 app.post("/users/:username/export-analyses", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const { username } = req.params;
 
   try {
@@ -546,6 +589,9 @@ app.post("/users/:username/export-analyses", async (req, res) => {
 
 // Delete Analysis Route
 app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const { username, analysisId } = req.params;
   try {
     const result = await User.updateOne(
@@ -648,6 +694,9 @@ app.get("/users/username", async (req, res) => {
 
 // Delete User Route
 app.delete("/users/:id", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const userId = req.params.id;
   try {
     const user = await User.findById(userId);
@@ -664,6 +713,9 @@ app.delete("/users/:id", async (req, res) => {
 
 // Update Follow-Up Status Route
 app.patch("/users/:id", async (req, res) => {
+  const auth = await authenticateUser(req, res);
+  if (auth.error) return;
+
   const { id } = req.params;
   const { followUpRequired } = req.body;
 
