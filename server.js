@@ -308,7 +308,7 @@ app.post("/register", async (req, res) => {
     res.cookie('username', username, {
       httpOnly: false,
       secure: true,
-      sameSite: 'None',
+      sameSite: 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
