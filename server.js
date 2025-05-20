@@ -46,6 +46,14 @@ app.use(cookieParser());
 // Trust Render's proxy for secure cookies
 app.set('trust proxy', 1);
 
+// Log cookies and headers for debugging
+app.use((req, res, next) => {
+  console.log('Request URL:', req.url);
+  console.log('Cookies:', req.cookies);
+  console.log('Headers:', req.headers);
+  next();
+});
+
 // CORS configuration
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'https://speech-park.web.app',
@@ -162,6 +170,8 @@ const analyzeTranscription = (transcription) => {
 
 // Authentication Helper Function
 const authenticateUser = async (req, res) => {
+  console.log('Authenticating for URL:', req.url);
+  console.log('Cookies received:', req.cookies);
   try {
     const username = req.cookies.username;
     if (!username) {
@@ -297,8 +307,8 @@ app.post("/register", async (req, res) => {
 
     res.cookie('username', username, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production' ? true : false,
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      secure: true,
+      sameSite: 'None',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -338,8 +348,8 @@ app.post("/login", async (req, res) => {
 
     res.cookie('username', username, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production' ? true : false,
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      secure: true,
+      sameSite: 'None',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -366,8 +376,8 @@ app.post("/login", async (req, res) => {
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
     httpOnly: false,
-    secure: process.env.NODE_ENV === 'production' ? true : false,
-    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+    secure: true,
+    sameSite: 'None',
     path: '/'
   });
   console.log('Logout successful, cookie cleared');
@@ -412,8 +422,8 @@ app.post('/google-login', async (req, res) => {
 
     res.cookie('username', user.username, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production' ? true : false,
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      secure: true,
+      sameSite: 'None',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -435,8 +445,6 @@ app.post('/google-login', async (req, res) => {
     res.status(400).json({ error: 'Google login failed' });
   }
 });
-
-// Analyze Audio Route
 
 // Save Analysis Route
 app.post('/save_analysis', async (req, res) => {
@@ -904,7 +912,8 @@ app.post('/api/session/start', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const updatedUser = await User.findByIdTurkish (userId,
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
       {
         $set: {
           'session.sessionActive': true,
