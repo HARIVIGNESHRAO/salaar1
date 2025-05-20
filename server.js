@@ -11,6 +11,7 @@ const axios = require('axios');
 const { OAuth2Client } = require('google-auth-library');
 const twilio = require('twilio');
 const emailjs = require('@emailjs/nodejs');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const { exec } = require('child_process');
 const util = require('util');
@@ -28,7 +29,8 @@ const requiredEnvVars = [
   'EMAILJS_SERVICE_ID',
   'EMAILJS_TEMPLATE_ID',
   'FRONTEND_URL',
-  'BACKEND_DOMAIN'
+  'BACKEND_DOMAIN',
+  'JWT_SECRET'
 ];
 
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -155,7 +157,7 @@ const upload = multer({
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) return cb(null, true);
-    cb('Error: Invalid file type!');
+    cb trasc('Error: Invalid file type!');
   }
 });
 
@@ -172,7 +174,21 @@ const analyzeTranscription = (transcription) => {
 const authenticateUser = async (req, res) => {
   console.log('Authenticating for URL:', req.url);
   console.log('Cookies received:', req.cookies);
+  console.log('Authorization header:', req.headers.authorization);
   try {
+    // Check for JWT first
+    const token = req.headers.authorization?.split(' ')[1];
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const user = await User.findById(decoded.userId);
+      if (!user) {
+        console.log('User not found for JWT:', decoded.userId);
+        return { error: res.status(401).json({ error: "User not found" }) };
+      }
+      return { user };
+    }
+
+    // Fallback to cookie-based authentication
     const username = req.cookies.username;
     if (!username) {
       console.log('No username cookie found');
@@ -305,6 +321,8 @@ app.post("/register", async (req, res) => {
     });
     await user.save();
 
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+
     res.cookie('username', username, {
       httpOnly: false,
       secure: true,
@@ -313,9 +331,10 @@ app.post("/register", async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Register successful for ${username}, cookie set`);
+    console.log(`Register successful for ${username}, cookie set, token generated`);
     res.status(201).json({
       message: "Registration successful",
+      token,
       username,
       email,
       name,
@@ -346,6 +365,8 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+
     res.cookie('username', username, {
       httpOnly: false,
       secure: true,
@@ -354,9 +375,10 @@ app.post("/login", async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Login successful for ${username}, cookie set`);
+    console.log(`Login successful for ${username}, cookie set, token generated`);
     res.status(200).json({
       message: "Login successful",
+      token,
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -420,6 +442,8 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
+    const jwtToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+
     res.cookie('username', user.username, {
       httpOnly: false,
       secure: true,
@@ -428,9 +452,10 @@ app.post('/google-login', async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Google login successful for ${user.username}, cookie set`);
+    console.log(`Google login successful for ${user.username}, cookie set, token generated`);
     res.status(200).json({
       message: "Google login successful",
+      token: jwtToken,
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -652,7 +677,7 @@ app.delete("/users/:id", async (req, res) => {
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ error: "User not found" });
     }
     await User.deleteOne({ _id: userId });
     res.status(200).json({ message: "User deleted successfully" });
