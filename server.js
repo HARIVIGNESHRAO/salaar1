@@ -11,7 +11,6 @@ const axios = require('axios');
 const { OAuth2Client } = require('google-auth-library');
 const twilio = require('twilio');
 const emailjs = require('@emailjs/nodejs');
-const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const { exec } = require('child_process');
 const util = require('util');
@@ -29,8 +28,7 @@ const requiredEnvVars = [
   'EMAILJS_SERVICE_ID',
   'EMAILJS_TEMPLATE_ID',
   'FRONTEND_URL',
-  'BACKEND_DOMAIN',
-  'JWT_SECRET'
+  'BACKEND_DOMAIN'
 ];
 
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -178,19 +176,22 @@ const authenticateUser = async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log('No valid JWT token provided');
-      return { error: res.status(401).json({ error: 'Please provide a valid token' }) };
+      console.log('No valid username provided in Authorization header');
+      return { error: res.status(401).json({ error: 'Please provide a valid username in Authorization header' }) };
     }
 
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const username = authHeader.split(' ')[1];
+    if (!username) {
+      console.log('Username not provided in Authorization header');
+      return { error: res.status(401).json({ error: 'Username required' }) };
+    }
 
-    const user = await User.findOne({ 
-      username: { $regex: new RegExp(`^${decoded.username}$`, 'i') }
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username}$`, 'i') }
     });
 
     if (!user) {
-      console.log(`User not found for username: ${decoded.username}`);
+      console.log(`User not found for username: ${username}`);
       return { error: res.status(401).json({ error: 'User not found' }) };
     }
 
@@ -198,10 +199,7 @@ const authenticateUser = async (req, res) => {
     return { user };
   } catch (error) {
     console.error('Authentication error:', error.message);
-    if (error.name === 'TokenExpiredError') {
-      return { error: res.status(401).json({ error: 'Token expired' }) };
-    }
-    return { error: res.status(401).json({ error: 'Invalid token' }) };
+    return { error: res.status(401).json({ error: 'Authentication failed' }) };
   }
 };
 
@@ -315,13 +313,6 @@ app.post("/register", async (req, res) => {
     });
     await user.save();
 
-    // Generate JWT
-    const token = jwt.sign(
-      { username: user.username, id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-
     // Set cookie for non-auth purposes
     res.cookie('username', username, {
       httpOnly: false,
@@ -331,11 +322,10 @@ app.post("/register", async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Register successful for ${username}, JWT issued and cookie set`);
+    console.log(`Register successful for ${username}`);
     res.status(201).json({
       message: "Registration successful",
-      token,
-      username,
+      username, // Client stores username in localStorage
       email,
       name,
       phoneNumber,
@@ -365,13 +355,6 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    // Generate JWT
-    const token = jwt.sign(
-      { username: user.username, id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-
     // Set cookie for non-auth purposes
     res.cookie('username', username, {
       httpOnly: false,
@@ -381,11 +364,10 @@ app.post("/login", async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Login successful for ${username}, JWT issued and cookie set`);
+    console.log(`Login successful for ${username}`);
     res.status(200).json({
       message: "Login successful",
-      token,
-      username: user.username,
+      username: user.username, // Client stores username in localStorage
       email: user.email,
       avatar: user.avatar,
       age: user.age,
@@ -409,7 +391,7 @@ app.post("/logout", (req, res) => {
     path: '/'
   });
   console.log('Logout successful, cookie cleared');
-  res.status(200).json({ message: "Logout successful. Please discard your JWT token." });
+  res.status(200).json({ message: "Logout successful. Please remove the username from localStorage." });
 });
 
 // Google Login Endpoint
@@ -448,13 +430,6 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
-    // Generate JWT
-    const jwtToken = jwt.sign(
-      { username: user.username, id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-
     // Set cookie for non-auth purposes
     res.cookie('username', user.username, {
       httpOnly: false,
@@ -464,11 +439,10 @@ app.post('/google-login', async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Google login successful for ${user.username}, JWT issued and cookie set`);
+    console.log(`Google login successful for ${user.username}`);
     res.status(200).json({
       message: "Google login successful",
-      token: jwtToken,
-      username: user.username,
+      username: user.username, // Client stores username in localStorage
       email: user.email,
       avatar: user.avatar,
       age: user.age,
