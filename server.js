@@ -56,7 +56,10 @@ app.use((req, res, next) => {
 
 // CORS configuration
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'https://speech-park.web.app',
+  origin: [
+    process.env.FRONTEND_URL || 'https://speech-park.web.app',
+    'http://localhost:3000' // Added for local development
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
@@ -168,24 +171,17 @@ const analyzeTranscription = (transcription) => {
   };
 };
 
-// Authentication Helper Function
-const authenticateUser = async (req, res) => {
-  console.log('Authenticating for URL:', req.url);
-  console.log('Headers:', req.headers);
+// Cookie-based Authentication Helper
+const checkUserCookie = async (req, res) => {
+  const username = req.cookies.username;
+  console.log('Checking cookie for username:', username);
+
+  if (!username) {
+    console.log('No username cookie provided');
+    return { error: res.status(401).json({ error: 'Please log in to access this resource' }) };
+  }
 
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log('No valid username provided in Authorization header');
-      return { error: res.status(401).json({ error: 'Please provide a valid username in Authorization header' }) };
-    }
-
-    const username = authHeader.split(' ')[1];
-    if (!username) {
-      console.log('Username not provided in Authorization header');
-      return { error: res.status(401).json({ error: 'Username required' }) };
-    }
-
     const user = await User.findOne({
       username: { $regex: new RegExp(`^${username}$`, 'i') }
     });
@@ -195,10 +191,9 @@ const authenticateUser = async (req, res) => {
       return { error: res.status(401).json({ error: 'User not found' }) };
     }
 
-    req.user = user;
     return { user };
   } catch (error) {
-    console.error('Authentication error:', error.message);
+    console.error('Cookie authentication error:', error.message);
     return { error: res.status(401).json({ error: 'Authentication failed' }) };
   }
 };
@@ -313,11 +308,11 @@ app.post("/register", async (req, res) => {
     });
     await user.save();
 
-    // Set cookie for non-auth purposes
+    // Set cookie for authentication
     res.cookie('username', username, {
-      httpOnly: false,
-      secure: true,
-      sameSite: 'Lax',
+      httpOnly: false, // Allow client-side access
+      secure: process.env.NODE_ENV === 'production', // Secure in production
+      sameSite: 'Lax', // Changed from 'None' for broader compatibility
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -325,7 +320,7 @@ app.post("/register", async (req, res) => {
     console.log(`Register successful for ${username}`);
     res.status(201).json({
       message: "Registration successful",
-      username, // Client stores username in localStorage
+      username,
       email,
       name,
       phoneNumber,
@@ -355,11 +350,11 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    // Set cookie for non-auth purposes
+    // Set cookie for authentication
     res.cookie('username', username, {
       httpOnly: false,
-      secure: true,
-      sameSite: 'None',
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -367,7 +362,7 @@ app.post("/login", async (req, res) => {
     console.log(`Login successful for ${username}`);
     res.status(200).json({
       message: "Login successful",
-      username: user.username, // Client stores username in localStorage
+      username: user.username,
       email: user.email,
       avatar: user.avatar,
       age: user.age,
@@ -386,12 +381,12 @@ app.post("/login", async (req, res) => {
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
     httpOnly: false,
-    secure: true,
-    sameSite: 'None',
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'Lax',
     path: '/'
   });
   console.log('Logout successful, cookie cleared');
-  res.status(200).json({ message: "Logout successful. Please remove the username from localStorage." });
+  res.status(200).json({ message: "Logout successful" });
 });
 
 // Google Login Endpoint
@@ -430,11 +425,11 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
-    // Set cookie for non-auth purposes
+    // Set cookie for authentication
     res.cookie('username', user.username, {
       httpOnly: false,
-      secure: true,
-      sameSite: 'None',
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -442,7 +437,7 @@ app.post('/google-login', async (req, res) => {
     console.log(`Google login successful for ${user.username}`);
     res.status(200).json({
       message: "Google login successful",
-      username: user.username, // Client stores username in localStorage
+      username: user.username,
       email: user.email,
       avatar: user.avatar,
       age: user.age,
@@ -459,15 +454,12 @@ app.post('/google-login', async (req, res) => {
 
 // Save Analysis Route
 app.post('/save_analysis', async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   try {
-    const { username, transcriptions, analyses } = req.body;
-
-    if (!username) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
+    const { transcriptions, analyses } = req.body;
+    const user = auth.user;
 
     if (!transcriptions || !analyses || transcriptions.length !== analyses.length || transcriptions.length === 0) {
       return res.status(400).json({ error: 'Both transcriptions and analyses are required and must match in length' });
@@ -479,8 +471,8 @@ app.post('/save_analysis', async (req, res) => {
       createdAt: new Date()
     }));
 
-    const user = await User.findOneAndUpdate(
-      { username },
+    const updatedUser = await User.findOneAndUpdate(
+      { username: user.username },
       {
         $push: {
           analyses: { $each: analysesToSave }
@@ -490,11 +482,11 @@ app.post('/save_analysis', async (req, res) => {
       { new: true }
     );
 
-    if (!user) {
+    if (!updatedUser) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.status(200).json({ message: 'Analyses saved successfully', visits: user.visits });
+    res.status(200).json({ message: 'Analyses saved successfully', visits: updatedUser.visits });
   } catch (error) {
     console.error('Error saving analyses:', error);
     res.status(500).json({ error: 'Failed to save analyses' });
@@ -503,7 +495,7 @@ app.post('/save_analysis', async (req, res) => {
 
 // Export All Analyses Route
 app.post("/users/:username/export-analyses", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const { username } = req.params;
@@ -563,7 +555,7 @@ app.post("/users/:username/export-analyses", async (req, res) => {
 
 // Delete Analysis Route
 app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const { username, analysisId } = req.params;
@@ -620,7 +612,6 @@ app.get("/users/username", async (req, res) => {
     console.log('Request headers for /users/username:', req.headers);
     console.log('Cookies for /users/username:', req.cookies);
     const username = req.cookies.username;
-    console.log('Fetching user with username from cookie:', username);
 
     if (!username) {
       console.log('No username cookie found in /users/username');
@@ -668,7 +659,7 @@ app.get("/users/username", async (req, res) => {
 
 // Delete User Route
 app.delete("/users/:id", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const userId = req.params.id;
@@ -687,7 +678,7 @@ app.delete("/users/:id", async (req, res) => {
 
 // Update Follow-Up Status Route
 app.patch("/users/:id", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const { id } = req.params;
@@ -721,7 +712,7 @@ app.patch("/users/:id", async (req, res) => {
 // Profile Routes
 // Get User Profile
 app.get("/api/user/profile", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const user = auth.user;
@@ -749,7 +740,7 @@ app.get("/api/user/profile", async (req, res) => {
 
 // Update User Profile
 app.put("/api/user/profile", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const user = auth.user;
@@ -820,7 +811,7 @@ app.put("/api/user/profile", async (req, res) => {
 
 // Send SMS Route
 app.post("/api/send-sms", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const user = auth.user;
@@ -858,7 +849,7 @@ app.post("/api/send-sms", async (req, res) => {
 
 // Approve Appointment Route
 app.patch("/api/user/approve-appointment", async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const user = auth.user;
@@ -905,7 +896,7 @@ app.patch("/api/user/approve-appointment", async (req, res) => {
 // Session Management Routes
 // Get Active Session
 app.get('/api/session/active', async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const user = auth.user;
@@ -923,7 +914,7 @@ app.get('/api/session/active', async (req, res) => {
 
 // Start Session
 app.post('/api/session/start', async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const { userId, question } = req.body;
@@ -967,7 +958,7 @@ app.post('/api/session/start', async (req, res) => {
 
 // Record Session Response
 app.post('/api/session/record_response', upload.single('file'), async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const user = auth.user;
@@ -1014,7 +1005,7 @@ app.post('/api/session/record_response', upload.single('file'), async (req, res)
 
 // Get Session Responses
 app.get('/api/session/responses/:userId', async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const { userId } = req.params;
@@ -1045,7 +1036,7 @@ app.get('/api/session/responses/:userId', async (req, res) => {
 
 // Save Session Analysis
 app.post('/api/session/save_analysis', async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const { userId, analysis } = req.body;
@@ -1094,7 +1085,7 @@ app.post('/api/session/save_analysis', async (req, res) => {
 
 // Get Latest Session Analysis
 app.get('/api/session/latest_analysis', async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const user = auth.user;
@@ -1110,7 +1101,7 @@ app.get('/api/session/latest_analysis', async (req, res) => {
 
 // End Session
 app.post('/api/session/end', async (req, res) => {
-  const auth = await authenticateUser(req, res);
+  const auth = await checkUserCookie(req, res);
   if (auth.error) return;
 
   const { userId } = req.body;
