@@ -346,7 +346,7 @@ app.post("/register", async (req, res) => {
     // Set cookie for authentication
     res.cookie('username', username, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production' ? true : false,
+      secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
@@ -388,7 +388,7 @@ app.post("/login", async (req, res) => {
     // Set cookie for authentication
     res.cookie('username', username, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production' ? true : false,
+      secure: process.env.NODE_ENV === 'production' ,
       sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
@@ -416,7 +416,7 @@ app.post("/login", async (req, res) => {
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
     httpOnly: false,
-    secure: process.env.NODE_ENV === 'production' ?true:false,
+    secure: process.env.NODE_ENV === 'production',
     sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
     path: '/'
   });
@@ -463,7 +463,7 @@ app.post('/google-login', async (req, res) => {
     // Set cookie for authentication
     res.cookie('username', user.username, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production'?true:false,
+      secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
