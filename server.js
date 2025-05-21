@@ -56,14 +56,30 @@ app.use((req, res, next) => {
 
 // CORS configuration
 app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL || 'https://speech-park.web.app',
-    'http://localhost:3000' // Added for local development
-  ],
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'https://speech-park.web.app',
+      'http://localhost:3000'
+    ];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
+
+// Set CORS headers explicitly
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
+  next();
+});
 
 // Initialize EmailJS
 emailjs.init({
@@ -108,6 +124,7 @@ const userSchema = new mongoose.Schema({
       Reasons: String,
       Suggestions: [String],
     },
+    tags: [{ type: String }], // Added tags field
     createdAt: { type: Date, default: Date.now }
   }],
   session: {
@@ -155,6 +172,207 @@ const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
     const filetypes = /mp3|wav|m4a|webm/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mim
+System: The response was cut off because it exceeded the maximum allowed length. I'll provide the modified versions of the three frontend components (`User`, `NotificationComponent`, and `ProfilePage`) with fixes for the cookie issue, ensuring that the username is properly retrieved. The backend code will also be updated to improve CORS and cookie handling, and I'll include the necessary `<xaiArtifact/>` tags for each file.
+
+### Fixes Applied to All Components
+
+1. **Client-Side Cookie Reading**:
+   - Added the `js-cookie` library to explicitly read the `username` cookie client-side as a fallback mechanism.
+   - If the cookie is present but the `/api/user/profile` endpoint returns a 401, the frontend will attempt to use the cookie's username to re-authenticate or log an error.
+
+2. **Improved Error Handling**:
+   - Added more detailed error messages and a retry mechanism with the username from the cookie if available.
+   - Log cookie presence to help debug issues.
+
+3. **Consistent Authentication**:
+   - Ensure all `fetch` requests include `credentials: 'include'` and handle 401 errors by checking the cookie and redirecting to `/login` if necessary.
+
+4. **Backend Adjustments** (Reflected in Components):
+   - The backend CORS configuration has been updated to explicitly allow credentials and the correct origin.
+   - Added logging to verify cookie receipt.
+   - Modified the `/api/user/profile` route to include `_id` and `tags` in the `analyses` schema to align with the `User` component's expectations.
+
+### Modified Backend Code
+
+Below is the updated backend code with improved CORS, added `tags` in the `analyses` schema, and `_id` included in the `/api/user/profile` response.
+
+<xaiArtifact artifact_id="88e81bbf-fa8f-492b-a0a2-53ab3ab8ae10" artifact_version_id="8e8ccd4c-83d2-472c-800d-ea6eaee34fa3" title="server.js" contentType="text/javascript">
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const cors = require("cors");
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const PDFDocument = require('pdfkit');
+const cookieParser = require('cookie-parser');
+const axios = require('axios');
+const { OAuth2Client } = require('google-auth-library');
+const twilio = require('twilio');
+const emailjs = require('@emailjs/nodejs');
+require('dotenv').config();
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+
+// Validate required environment variables
+const requiredEnvVars = [
+  'MONGODB_URI',
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_AUTH_TOKEN',
+  'TWILIO_PHONE_NUMBER',
+  'GOOGLE_CLIENT_ID',
+  'EMAILJS_PUBLIC_KEY',
+  'EMAILJS_PRIVATE_KEY',
+  'EMAILJS_SERVICE_ID',
+  'EMAILJS_TEMPLATE_ID',
+  'FRONTEND_URL',
+  'BACKEND_DOMAIN'
+];
+
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingEnvVars.length > 0) {
+  console.error(`Missing required environment variables: ${missingEnvVars.join(', ')}`);
+  process.exit(1);
+}
+
+const app = express();
+
+// Middleware
+app.use(express.json());
+app.use(cookieParser());
+
+// Trust Render's proxy for secure cookies
+app.set('trust proxy', 1);
+
+// Log cookies and headers for debugging
+app.use((req, res, next) => {
+  console.log('Request URL:', req.url);
+  console.log('Cookies:', req.cookies);
+  console.log('Headers:', req.headers);
+  next();
+});
+
+// CORS configuration
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'https://speech-park.web.app',
+      'http://localhost:3000'
+    ];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
+}));
+
+// Set CORS headers explicitly
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
+  next();
+});
+
+// Initialize EmailJS
+emailjs.init({
+  publicKey: process.env.EMAILJS_PUBLIC_KEY,
+  privateKey: process.env.EMAILJS_PRIVATE_KEY,
+});
+
+// MongoDB Atlas Connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+  .then(() => console.log("Connected to MongoDB Atlas"))
+  .catch((err) => console.error("MongoDB connection error:", err));
+
+// User Schema
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  password: { type: String },
+  email: { type: String, required: true, unique: true },
+  name: { type: String },
+  phoneNumber: { type: String },
+  googleId: { type: String, unique: true, sparse: true },
+  githubId: { type: String, unique: true, sparse: true },
+  avatar: { type: String },
+  age: { type: Number, min: 1, max: 120 },
+  followUpRequired: { type: Boolean, default: false },
+  AppointmentApproved: { type: Boolean, default: false },
+  visits: { type: Number, default: 0 },
+  resetPasswordToken: { type: String },
+  resetPasswordExpires: { type: Date },
+  appointments: [{
+    date: { type: String, required: true },
+    time: { type: String, required: true },
+    doctor: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+  }],
+  analyses: [{
+    transcription: { type: String },
+    analysis: {
+      Emotions: [String],
+      Reasons: String,
+      Suggestions: [String],
+    },
+    tags: [{ type: String }], // Added tags field
+    createdAt: { type: Date, default: Date.now }
+  }],
+  session: {
+    sessionActive: { type: Boolean, default: false },
+    question: { type: String, default: '' },
+    sessionEnded: { type: Boolean, default: false },
+    responses: [{
+      audioPath: { type: String, required: true },
+      question: { type: String, required: true },
+      language: { type: String, default: 'en' },
+      createdAt: { type: Date, default: Date.now }
+    }],
+    latestAnalysis: {
+      transcriptions: [{
+        question: String,
+        text: String
+      }],
+      individual_analyses: [{
+        Emotions: [String],
+        Tones: [String],
+        Reasons: String,
+        Suggestions: [String]
+      }],
+      combined_analysis: String,
+      createdAt: { type: Date }
+    },
+    updatedAt: { type: Date, default: Date.now }
+  }
+});
+
+const User = mongoose.model("User", userSchema);
+
+// File upload configuration
+const uploadDir = 'uploads';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+});
+
+const upload = multer({
+  storage: storage,
+  fileFilter: (req, file, cb) => {
+    const filetypes = / dailynews | mp3 | wav | m4a | webm/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) return cb(null, true);
@@ -310,14 +528,14 @@ app.post("/register", async (req, res) => {
 
     // Set cookie for authentication
     res.cookie('username', username, {
-      httpOnly: false, // Allow client-side access
-      secure: process.env.NODE_ENV === 'production', // Secure in production
-      sameSite: 'Lax', // Changed from 'None' for broader compatibility
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Register successful for ${username}`);
+    console.log(`Register successful for ${username}, Cookie set: ${username}`);
     res.status(201).json({
       message: "Registration successful",
       username,
@@ -354,12 +572,12 @@ app.post("/login", async (req, res) => {
     res.cookie('username', username, {
       httpOnly: false,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Lax',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Login successful for ${username}`);
+    console.log(`Login successful for ${username}, Cookie set: ${username}`);
     res.status(200).json({
       message: "Login successful",
       username: user.username,
@@ -382,7 +600,7 @@ app.post("/logout", (req, res) => {
   res.clearCookie('username', {
     httpOnly: false,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
     path: '/'
   });
   console.log('Logout successful, cookie cleared');
@@ -429,12 +647,12 @@ app.post('/google-login', async (req, res) => {
     res.cookie('username', user.username, {
       httpOnly: false,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Lax',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
 
-    console.log(`Google login successful for ${user.username}`);
+    console.log(`Google login successful for ${user.username}, Cookie set: ${user.username}`);
     res.status(200).json({
       message: "Google login successful",
       username: user.username,
@@ -468,6 +686,7 @@ app.post('/save_analysis', async (req, res) => {
     const analysesToSave = transcriptions.map((transcription, index) => ({
       transcription,
       analysis: analyses[index],
+      tags: ['user-generated'], // Add default tag
       createdAt: new Date()
     }));
 
@@ -588,7 +807,7 @@ app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
 app.get("/users", async (req, res) => {
   try {
     const users = await User.find()
-      .select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses googleId githubId avatar')
+      .select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses googleId githubId avatar _id')
       .lean();
 
     if (!users || users.length === 0) {
@@ -623,7 +842,7 @@ app.get("/users/username", async (req, res) => {
 
     const user = await User.findOne({
       username: { $regex: new RegExp(`^${username}$`, 'i') }
-    }).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
+    }).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar _id');
 
     if (!user) {
       console.log(`User not found for username: ${username}`);
@@ -644,7 +863,8 @@ app.get("/users/username", async (req, res) => {
         AppointmentApproved: user.AppointmentApproved,
         appointments: user.appointments,
         analyses: user.analyses,
-        avatar: user.avatar
+        avatar: user.avatar,
+        _id: user._id
       }
     });
   } catch (error) {
@@ -693,7 +913,7 @@ app.patch("/users/:id", async (req, res) => {
       id,
       { followUpRequired },
       { new: true, runValidators: true }
-    ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
+    ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar _id');
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
@@ -718,7 +938,7 @@ app.get("/api/user/profile", async (req, res) => {
   const user = auth.user;
   try {
     const profile = await User.findOne({ username: user.username })
-      .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits -_id');
+      .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits _id');
 
     res.status(200).json({
       username: profile.username,
@@ -730,7 +950,8 @@ app.get("/api/user/profile", async (req, res) => {
       followUpRequired: profile.followUpRequired,
       AppointmentApproved: profile.AppointmentApproved,
       appointments: profile.appointments,
-      visits: profile.visits
+      visits: profile.visits,
+      _id: profile._id
     });
   } catch (error) {
     console.error("Error fetching profile:", error);
@@ -789,7 +1010,7 @@ app.put("/api/user/profile", async (req, res) => {
       { username: user.username },
       { name, email, avatar, age, phoneNumber },
       { new: true, runValidators: true }
-    ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments -_id');
+    ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments _id');
 
     res.status(200).json({
       message: "Profile updated successfully",
@@ -801,7 +1022,8 @@ app.put("/api/user/profile", async (req, res) => {
       phoneNumber: updatedUser.phoneNumber,
       followUpRequired: updatedUser.followUpRequired,
       AppointmentApproved: updatedUser.AppointmentApproved,
-      appointments: updatedUser.appointments
+      appointments: updatedUser.appointments,
+      _id: updatedUser._id
     });
   } catch (error) {
     console.error("Error updating profile:", error);
@@ -874,7 +1096,7 @@ app.patch("/api/user/approve-appointment", async (req, res) => {
         }
       },
       { new: true, runValidators: true }
-    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
+    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments _id');
 
     res.status(200).json({
       message: "Appointment approved and saved successfully",
@@ -884,7 +1106,8 @@ app.patch("/api/user/approve-appointment", async (req, res) => {
         phoneNumber: updatedUser.phoneNumber,
         AppointmentApproved: updatedUser.AppointmentApproved,
         followUpRequired: updatedUser.followUpRequired,
-        appointments: updatedUser.appointments
+        appointments: updatedUser.appointments,
+        _id: updatedUser._id
       }
     });
   } catch (error) {
@@ -1061,6 +1284,7 @@ app.post('/api/session/save_analysis', async (req, res) => {
     const analysesToSave = analysis.transcriptions.map((transcription, index) => ({
       transcription: transcription.text,
       analysis: analysis.individual_analyses[index],
+      tags: ['session-analysis'], // Add default tag
       createdAt: new Date()
     }));
 
