@@ -419,8 +419,12 @@ app.get('/auth', (req, res) => {
 });
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
+  console.log('Google login request body:', req.body);
   try {
     const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ error: 'Google ID token is required' });
+    }
     const ticket = await googleClient.verifyIdToken({
       idToken: token,
       audience: process.env.GOOGLE_CLIENT_ID,
@@ -452,7 +456,7 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
-    res.cookie('username', username, {
+    res.cookie('username', user.username, {
       httpOnly: true,
       secure: true,
       sameSite: 'None',
@@ -473,8 +477,8 @@ app.post('/google-login', async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
-    console.error("Google login error:", error);
-    res.status(400).json({ error: 'Google login failed' });
+    console.error("Google login error:", error.message);
+    res.status(400).json({ error: 'Google login failed', details: error.message });
   }
 });
 
