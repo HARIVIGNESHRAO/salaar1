@@ -429,18 +429,22 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
   try {
     const { token } = req.body;
+    console.log('Received token:', token); // Log the token
     const ticket = await googleClient.verifyIdToken({
       idToken: token,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
     const payload = ticket.getPayload();
+    console.log('Google payload:', payload); // Log the payload
     const { sub: googleId, email, name } = payload;
 
     let user = await User.findOne({ googleId });
     if (!user) {
       const username = email.split('@')[0] + Math.floor(Math.random() * 1000);
+      console.log('Generated username:', username); // Log the generated username
       const existingUser = await User.findOne({ $or: [{ username }, { email }] });
       if (existingUser) {
+        console.log('Existing user found:', existingUser); // Log existing user
         if (existingUser.username === username) return res.status(400).json({ error: "Derived username already exists" });
         if (existingUser.email === email) return res.status(400).json({ error: "Email already exists" });
       }
@@ -458,6 +462,7 @@ app.post('/google-login', async (req, res) => {
         session: { sessionActive: false, question: '', sessionEnded: false, responses: [], latestAnalysis: null }
       });
       await user.save();
+      console.log('New user created:', user); // Log the new user
     }
 
     // Set cookie for authentication
@@ -482,8 +487,8 @@ app.post('/google-login', async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
-    console.error("Google login error:", error);
-    res.status(400).json({ error: 'Google login failed' });
+    console.error("Google login error:", error.message, error.stack); // Log detailed error
+    res.status(400).json({ error: 'Google login failed', details: error.message });
   }
 });
 
