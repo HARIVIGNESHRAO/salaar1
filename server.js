@@ -1,7 +1,7 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const cors = require('cors');
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const cors = require("cors");
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -11,75 +11,89 @@ const axios = require('axios');
 const { OAuth2Client } = require('google-auth-library');
 const twilio = require('twilio');
 const emailjs = require('@emailjs/nodejs');
-const { cleanEnv, str, url, port } = require('envalid');
-const rateLimit = require('express-rate-limit');
-const helmet = require('helmet');
-const morgan = require('morgan');
-const { body, validationResult } = require('express-validator');
-require('express-async-errors');
-const crypto = require('crypto');
+require('dotenv').config();
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
-// Validate environment variables
-const env = cleanEnv(process.env, {
-  MONGODB_URI: url(),
-  TWILIO_ACCOUNT_SID: str(),
-  TWILIO_AUTH_TOKEN: str(),
-  TWILIO_PHONE_NUMBER: str(),
-  GOOGLE_CLIENT_ID: str(),
-  EMAILJS_PUBLIC_KEY: str(),
-  EMAILJS_PRIVATE_KEY: str(),
-  EMAILJS_SERVICE_ID: str(),
-  EMAILJS_TEMPLATE_ID: str(),
-  PORT: port({ default: 5001 }),
-  FRONTEND_URL: str({ default: 'http://localhost:3000' }) // Add your frontend URL
-});
+// Validate required environment variables
+const requiredEnvVars = [
+  'MONGODB_URI',
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_AUTH_TOKEN',
+  'TWILIO_PHONE_NUMBER',
+  'GOOGLE_CLIENT_ID',
+  'EMAILJS_PUBLIC_KEY',
+  'EMAILJS_PRIVATE_KEY',
+  'EMAILJS_SERVICE_ID',
+  'EMAILJS_TEMPLATE_ID',
+  'FRONTEND_URL',
+  'BACKEND_DOMAIN'
+];
 
-// Initialize Express
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingEnvVars.length > 0) {
+  console.error(`Missing required environment variables: ${missingEnvVars.join(', ')}`);
+  process.exit(1);
+}
+
 const app = express();
 
 // Middleware
-app.set('trust proxy', 1); // Trust first proxy for HTTPS
-app.use(helmet()); // Secure HTTP headers
-app.use(morgan('combined')); // HTTP request logging
 app.use(express.json());
-app.use(cors({
-  origin: env.FRONTEND_URL,
-  credentials: true
-}));
 app.use(cookieParser());
 
-// Rate limiting for sensitive routes
-app.use('/login', rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10
+// Trust Render's proxy for secure cookies
+app.set('trust proxy', 1);
+
+// Log cookies and headers for debugging
+app.use((req, res, next) => {
+  console.log('Request URL:', req.url);
+  console.log('Cookies:', req.cookies);
+  console.log('Headers:', req.headers);
+  next();
+});
+
+// CORS configuration
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'https://speech-park.web.app',
+      'http://localhost:3000'
+    ];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
-app.use('/forgot-password', rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5
-}));
+
+// Set CORS headers explicitly
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
+  next();
+});
 
 // Initialize EmailJS
 emailjs.init({
-  publicKey: env.EMAILJS_PUBLIC_KEY,
-  privateKey: env.EMAILJS_PRIVATE_KEY,
+  publicKey: process.env.EMAILJS_PUBLIC_KEY,
+  privateKey: process.env.EMAILJS_PRIVATE_KEY,
 });
 
-// MongoDB Connection with Retry
-const connectWithRetry = () => {
-  mongoose.connect(env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-    serverSelectionTimeoutMS: 5000,
-    heartbeatFrequencyMS: 10000,
-    maxPoolSize: 10
-  })
-    .then(() => console.log('Connected to MongoDB Atlas'))
-    .catch((err) => {
-      console.error('MongoDB connection error:', err);
-      setTimeout(connectWithRetry, 5000);
-    });
-};
-connectWithRetry();
+// MongoDB Atlas Connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+  .then(() => console.log("Connected to MongoDB Atlas"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -110,6 +124,7 @@ const userSchema = new mongoose.Schema({
       Reasons: String,
       Suggestions: [String],
     },
+    tags: [{ type: String }],
     createdAt: { type: Date, default: Date.now }
   }],
   session: {
@@ -140,38 +155,49 @@ const userSchema = new mongoose.Schema({
   }
 });
 
-// Indexes for performance
-userSchema.index({ username: 1 });
-userSchema.index({ email: 1 });
-userSchema.index({ googleId: 1 });
-userSchema.index({ githubId: 1 });
+const User = mongoose.model("User", userSchema);
 
-const User = mongoose.model('User', userSchema);
-
-// File Upload Configuration
+// File upload configurations
 const uploadDir = 'uploads';
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
 
-const storage = multer.diskStorage({
+// Multer for audio files (for session recordings)
+const audioStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+  filename: (req, file, cb) => cb(null, `audio-${Date.now()}-${file.originalname}`)
 });
 
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+const audioUpload = multer({
+  storage: audioStorage,
   fileFilter: (req, file, cb) => {
     const filetypes = /mp3|wav|m4a|webm/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) return cb(null, true);
-    cb(new Error('Invalid file type! Only mp3, wav, m4a, and webm are allowed.'));
+    cb(new Error('Error: Only audio files (mp3, wav, m4a, webm) are allowed!'));
   }
 });
 
-// Mock Analysis Function
+// Multer for image files (for avatar uploads)
+const imageStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, `avatar-${Date.now()}-${file.originalname}`)
+});
+
+const imageUpload = multer({
+  storage: imageStorage,
+  fileFilter: (req, file, cb) => {
+    const filetypes = /jpeg|jpg|png/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mimetype);
+    if (extname && mimetype) return cb(null, true);
+    cb(new Error('Error: Only image files (jpeg, jpg, png) are allowed!'));
+  }
+});
+
+// Mock analysis function
 const analyzeTranscription = (transcription) => {
   return {
     Emotions: ['happy', 'calm'],
@@ -180,39 +206,43 @@ const analyzeTranscription = (transcription) => {
   };
 };
 
-// Authentication Middleware
-const authMiddleware = async (req, res, next) => {
+// Cookie-based Authentication Helper
+const checkUserCookie = async (req, res) => {
+  const username = req.cookies.username;
+  console.log('Checking cookie for username:', username);
+
+  if (!username) {
+    console.log('No username cookie provided');
+    return { error: res.status(401).json({ error: 'Please log in to access this resource' }) };
+  }
+
   try {
-    const username = req.cookies.username;
-    if (!username) {
-      return res.status(401).json({ error: 'Please log in first' });
-    }
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username}$`, 'i') }
+    });
 
-    const user = await User.findOne({ username });
     if (!user) {
-      return res.status(401).json({ error: 'User not found' });
+      console.log(`User not found for username: ${username}`);
+      return { error: res.status(401).json({ error: 'User not found' }) };
     }
 
-    req.user = user;
-    next();
+    return { user };
   } catch (error) {
-    res.status(500).json({ error: 'Authentication error: ' + error.message });
+    console.error('Cookie authentication error:', error.message);
+    return { error: res.status(401).json({ error: 'Authentication failed' }) };
   }
 };
 
 // Twilio Client Setup
-const client = twilio(env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN);
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // Forgot Password Route
-app.post('/forgot-password', [
-  body('email').isEmail().normalizeEmail()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-
+app.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
 
   try {
     const user = await User.findOne({ email });
@@ -220,14 +250,12 @@ app.post('/forgot-password', [
       return res.status(404).json({ error: 'User with this email does not exist' });
     }
 
-    // Generate secure token
-    const verificationCode = crypto.randomBytes(20).toString('hex');
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
     user.resetPasswordToken = verificationCode;
-    user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
+    user.resetPasswordExpires = Date.now() + 3600000;
     await user.save();
 
-    // Send email with verification code
-    await emailjs.send(env.EMAILJS_SERVICE_ID, env.EMAILJS_TEMPLATE_ID, {
+    await emailjs.send(process.env.EMAILJS_SERVICE_ID, process.env.EMAILJS_TEMPLATE_ID, {
       email: email,
       passcode: verificationCode,
     });
@@ -240,17 +268,12 @@ app.post('/forgot-password', [
 });
 
 // Reset Password Route
-app.post('/reset-password', [
-  body('email').isEmail().normalizeEmail(),
-  body('code').isString().notEmpty(),
-  body('newPassword').isLength({ min: 8 })
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-
+app.post('/reset-password', async (req, res) => {
   const { email, code, newPassword } = req.body;
+
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: 'Email, verification code, and new password are required' });
+  }
 
   try {
     const user = await User.findOne({
@@ -263,7 +286,8 @@ app.post('/reset-password', [
       return res.status(400).json({ error: 'Invalid or expired verification code' });
     }
 
-    user.password = await bcrypt.hash(newPassword, 10);
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     await user.save();
@@ -276,25 +300,31 @@ app.post('/reset-password', [
 });
 
 // Register Route
-app.post('/register', [
-  body('username').trim().isLength({ min: 3 }).escape(),
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 8 }),
-  body('phoneNumber').optional().isMobilePhone('any'),
-  body('age').optional().isInt({ min: 1, max: 120 })
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
+app.post("/register", async (req, res) => {
+  const { username, password, email, name, phoneNumber, avatar, age } = req.body;
+
+  if (!username || !password || !email) {
+    return res.status(400).json({ error: "Username, password, and email are required" });
   }
 
-  const { username, password, email, name, phoneNumber, avatar, age } = req.body;
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: "Invalid email format" });
+  }
+
+  if (phoneNumber && !/^\+?[1-9]\d{1,14}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: "Invalid phone number format" });
+  }
+
+  if (age && (isNaN(age) || age < 1 || age > 120)) {
+    return res.status(400).json({ error: "Age must be a number between 1 and 120" });
+  }
 
   try {
     const existingUser = await User.findOne({ $or: [{ username }, { email }] });
     if (existingUser) {
-      if (existingUser.username === username) return res.status(400).json({ error: 'Username already exists' });
-      if (existingUser.email === email) return res.status(400).json({ error: 'Email already exists' });
+      if (existingUser.username === username) return res.status(400).json({ error: "Username already exists" });
+      if (existingUser.email === email) return res.status(400).json({ error: "Email already exists" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -313,8 +343,18 @@ app.post('/register', [
     });
     await user.save();
 
+    // Set cookie for authentication
+    res.cookie('username', username, {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      path: '/',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+
+    console.log(`Register successful for ${username}, Cookie set: ${username}`);
     res.status(201).json({
-      message: 'Registration successful',
+      message: "Registration successful",
       username,
       email,
       name,
@@ -326,37 +366,37 @@ app.post('/register', [
       appointments: []
     });
   } catch (error) {
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Register error:', error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Login Route
-app.post('/login', [
-  body('username').trim().isLength({ min: 3 }).escape(),
-  body('password').isLength({ min: 8 })
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-
+app.post("/login", async (req, res) => {
   const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ error: "Username and password are required" });
+  }
 
   try {
     const user = await User.findOne({ username });
     if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).json({ error: 'Invalid username or password' });
+      return res.status(401).json({ error: "Invalid username or password" });
     }
 
+    // Set cookie for authentication
     res.cookie('username', username, {
-      httpOnly: true,
-      secure: env.isProd,
-      sameSite: 'strict',
-      maxAge: 24 * 60 * 60 * 1000 // 1 day
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production' ,
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      path: '/',
+      maxAge: 24 * 60 * 60 * 1000
     });
 
+    console.log(`Login successful for ${username}, Cookie set: ${username}`);
     res.status(200).json({
-      message: 'Login successful',
+      message: "Login successful",
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -367,28 +407,31 @@ app.post('/login', [
       appointments: user.appointments
     });
   } catch (error) {
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error('Login error:', error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Logout Route
-app.post('/logout', (req, res) => {
-  res.clearCookie('username', { path: '/' });
-  res.status(200).json({ message: 'Logout successful' });
+app.post("/logout", (req, res) => {
+  res.clearCookie('username', {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+    path: '/'
+  });
+  console.log('Logout successful, cookie cleared');
+  res.status(200).json({ message: "Logout successful" });
 });
 
 // Google Login Endpoint
-const googleClient = new OAuth2Client(env.GOOGLE_CLIENT_ID);
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
   try {
     const { token } = req.body;
-    if (!token) {
-      return res.status(400).json({ error: 'Google token is required' });
-    }
-
     const ticket = await googleClient.verifyIdToken({
       idToken: token,
-      audience: env.GOOGLE_CLIENT_ID,
+      audience: process.env.GOOGLE_CLIENT_ID,
     });
     const payload = ticket.getPayload();
     const { sub: googleId, email, name } = payload;
@@ -398,8 +441,8 @@ app.post('/google-login', async (req, res) => {
       const username = email.split('@')[0] + Math.floor(Math.random() * 1000);
       const existingUser = await User.findOne({ $or: [{ username }, { email }] });
       if (existingUser) {
-        if (existingUser.username === username) return res.status(400).json({ error: 'Derived username already exists' });
-        if (existingUser.email === email) return res.status(400).json({ error: 'Email already exists' });
+        if (existingUser.username === username) return res.status(400).json({ error: "Derived username already exists" });
+        if (existingUser.email === email) return res.status(400).json({ error: "Email already exists" });
       }
 
       user = new User({
@@ -417,15 +460,18 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
+    // Set cookie for authentication
     res.cookie('username', user.username, {
-      httpOnly: true,
-      secure: env.isProd,
-      sameSite: 'strict',
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
 
+    console.log(`Google login successful for ${user.username}, Cookie set: ${user.username}`);
     res.status(200).json({
-      message: 'Google login successful',
+      message: "Google login successful",
       username: user.username,
       email: user.email,
       avatar: user.avatar,
@@ -436,120 +482,33 @@ app.post('/google-login', async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
-    console.error('Google login error:', error);
+    console.error("Google login error:", error);
     res.status(400).json({ error: 'Google login failed' });
   }
 });
 
-// Analyze Audio Route
-app.post('/analyze_audio', upload.single('file'), [
-  body('username').trim().isLength({ min: 3 }).escape()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    return res.status(400).json({ errors: errors.array() });
-  }
-
-  const { username } = req.body;
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
-
-  try {
-    const user = await User.findOne({ username });
-    if (!user) {
-      fs.unlinkSync(req.file.path);
-      return res.status(401).json({ error: 'User not found' });
-    }
-
-    const transcription = 'Sample transcription from audio';
-    const analysis = analyzeTranscription(transcription);
-
-    user.analyses.push({ transcription, analysis });
-    await user.save();
-
-    fs.unlinkSync(req.file.path);
-
-    res.json({
-      username,
-      email: user.email,
-      transcription,
-      analysis,
-      followUpRequired: user.followUpRequired,
-      AppointmentApproved: user.AppointmentApproved,
-      appointments: user.appointments
-    });
-  } catch (error) {
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
-
-// Generate PDF Route
-app.post('/generate_pdf', async (req, res) => {
-  const { analysis } = req.body;
-  if (!analysis) {
-    return res.status(400).json({ error: 'Analysis data is required' });
-  }
-
-  try {
-    const doc = new PDFDocument();
-    const filename = `mental_health_report_${Date.now()}.pdf`;
-    doc.pipe(fs.createWriteStream(filename));
-
-    doc.fontSize(22).text('Mental Health Analysis Report', { align: 'center' });
-    doc.fontSize(10).text(`Date: ${new Date().toLocaleString()}`, { align: 'left' });
-    doc.moveDown();
-
-    doc.fontSize(14).text('Emotions Identified:');
-    (analysis.Emotions || []).forEach(emotion => doc.text(`• ${emotion}`));
-    doc.moveDown();
-
-    doc.fontSize(14).text('Tones Identified:');
-    (analysis.Tones || []).forEach(tone => doc.text(`• ${tone}`));
-    doc.moveDown();
-
-    doc.fontSize(14).text('Possible Reasons:');
-    doc.fontSize(10).text(analysis.Reasons || 'Not provided', { align: 'justify' });
-    doc.moveDown();
-
-    doc.fontSize(14).text('Suggestions:');
-    (analysis.Suggestions || []).forEach(suggestion => doc.text(`✔ ${suggestion}`));
-
-    doc.end();
-
-    res.download(filename, 'Analysis_Report.pdf', (err) => {
-      if (!err) {
-        fs.unlinkSync(filename);
-      } else {
-        console.error('Download error:', err);
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
-
 // Save Analysis Route
-app.post('/save_analysis', authMiddleware, async (req, res) => {
-  const { username, transcriptions, analyses } = req.body;
-
-  if (!transcriptions || !analyses || transcriptions.length !== analyses.length || transcriptions.length === 0) {
-    return res.status(400).json({ error: 'Both transcriptions and analyses are required and must match in length' });
-  }
+app.post('/save_analysis', async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
   try {
+    const { transcriptions, analyses } = req.body;
+    const user = auth.user;
+
+    if (!transcriptions || !analyses || transcriptions.length !== analyses.length || transcriptions.length === 0) {
+      return res.status(400).json({ error: 'Both transcriptions and analyses are required and must match in length' });
+    }
+
     const analysesToSave = transcriptions.map((transcription, index) => ({
       transcription,
       analysis: analyses[index],
+      tags: ['user-generated'],
       createdAt: new Date()
     }));
 
-    const user = await User.findOneAndUpdate(
-      { username },
+    const updatedUser = await User.findOneAndUpdate(
+      { username: user.username },
       {
         $push: {
           analyses: { $each: analysesToSave }
@@ -559,11 +518,11 @@ app.post('/save_analysis', authMiddleware, async (req, res) => {
       { new: true }
     );
 
-    if (!user) {
+    if (!updatedUser) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.status(200).json({ message: 'Analyses saved successfully', visits: user.visits });
+    res.status(200).json({ message: 'Analyses saved successfully', visits: updatedUser.visits });
   } catch (error) {
     console.error('Error saving analyses:', error);
     res.status(500).json({ error: 'Failed to save analyses' });
@@ -571,13 +530,16 @@ app.post('/save_analysis', authMiddleware, async (req, res) => {
 });
 
 // Export All Analyses Route
-app.post('/users/:username/export-analyses', async (req, res) => {
+app.post("/users/:username/export-analyses", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
+
   const { username } = req.params;
 
   try {
     const user = await User.findOne({ username });
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: "User not found" });
     }
 
     const doc = new PDFDocument();
@@ -618,17 +580,20 @@ app.post('/users/:username/export-analyses', async (req, res) => {
         fs.unlinkSync(filename);
       } else {
         console.error('Export error:', err);
-        res.status(500).json({ error: 'Failed to export analyses' });
+        res.status(500).json({ error: "Failed to export analyses" });
       }
     });
   } catch (error) {
-    console.error('Export error:', error.message);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error("Export error:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Delete Analysis Route
-app.delete('/users/:username/analyses/:analysisId', async (req, res) => {
+app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
+
   const { username, analysisId } = req.params;
   try {
     const result = await User.updateOne(
@@ -639,54 +604,68 @@ app.delete('/users/:username/analyses/:analysisId', async (req, res) => {
     if (result.modifiedCount === 0) {
       const user = await User.findOne({ username });
       if (!user) {
-        return res.status(404).json({ success: false, message: 'User not found' });
+        return res.status(404).json({ success: false, message: "User not found" });
       }
       const analysisExists = user.analyses.some(a => a._id.toString() === analysisId);
       if (!analysisExists) {
-        return res.status(404).json({ success: false, message: 'Analysis not found' });
+        return res.status(404).json({ success: false, message: "Analysis not found" });
       }
-      return res.status(500).json({ success: false, message: 'Failed to delete analysis' });
+      return res.status(500).json({ success: false, message: "Failed to delete analysis" });
     }
 
-    res.status(200).json({ success: true, message: 'Analysis deleted successfully' });
+    res.status(200).json({ success: true, message: "Analysis deleted successfully" });
   } catch (error) {
-    console.error('Error deleting analysis:', error.message);
-    res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+    console.error("Error deleting analysis:", error.message);
+    res.status(500).json({ success: false, message: "Server error: " + error.message });
   }
 });
 
 // Get All Users Route
-app.get('/users', async (req, res) => {
+app.get("/users", async (req, res) => {
   try {
     const users = await User.find()
-      .select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses googleId githubId avatar')
+      .select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses googleId githubId avatar _id')
       .lean();
 
     if (!users || users.length === 0) {
-      return res.status(404).json({ message: 'No users found' });
+      return res.status(404).json({ message: "No users found" });
     }
 
     res.status(200).json({
-      message: 'Users retrieved successfully',
+      message: "Users retrieved successfully",
       count: users.length,
       users
     });
   } catch (error) {
-    console.error('Error fetching users:', error.message);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error("Error fetching users:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Get User by Username Route
-app.get('/users/username', authMiddleware, async (req, res) => {
+app.get("/users/username", async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.user.username })
-      .select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
+    console.log('Request headers for /users/username:', req.headers);
+    console.log('Cookies for /users/username:', req.cookies);
+    const username = req.cookies.username;
+
+    if (!username) {
+      console.log('No username cookie found in /users/username');
+      return res.status(401).json({
+        success: false,
+        message: "No username found in cookies. Please log in."
+      });
+    }
+
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username}$`, 'i') }
+    }).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar _id');
 
     if (!user) {
+      console.log(`User not found for username: ${username}`);
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: "User not found"
       });
     }
 
@@ -701,141 +680,155 @@ app.get('/users/username', authMiddleware, async (req, res) => {
         AppointmentApproved: user.AppointmentApproved,
         appointments: user.appointments,
         analyses: user.analyses,
-        avatar: user.avatar
+        avatar: user.avatar,
+        _id: user._id
       }
     });
   } catch (error) {
-    console.error('Error fetching user:', error);
+    console.error('Error fetching user:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Server error',
+      message: "Server error",
       error: error.message
     });
   }
 });
 
 // Delete User Route
-app.delete('/users/:id', async (req, res) => {
+app.delete("/users/:id", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
+
   const userId = req.params.id;
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ message: "User not found" });
     }
     await User.deleteOne({ _id: userId });
-    res.status(200).json({ message: 'User deleted successfully' });
+    res.status(200).json({ message: "User deleted successfully" });
   } catch (error) {
-    console.error('Error deleting user:', error.message);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error("Error deleting user:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Update Follow-Up Status Route
-app.patch('/users/:id', [
-  body('followUpRequired').isBoolean()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+app.patch("/users/:id", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
   const { id } = req.params;
   const { followUpRequired } = req.body;
+
+  if (typeof followUpRequired !== 'boolean') {
+    return res.status(400).json({ error: "followUpRequired must be a boolean" });
+  }
 
   try {
     const user = await User.findByIdAndUpdate(
       id,
       { followUpRequired },
       { new: true, runValidators: true }
-    ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
+    ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar _id');
 
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: "User not found" });
     }
 
     res.status(200).json({
-      message: 'Follow-up status updated successfully',
+      message: "Follow-up status updated successfully",
       user
     });
   } catch (error) {
-    console.error('Error updating follow-up status:', error.message);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error("Error updating follow-up status:", error.message);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Profile Routes
-app.get('/api/user/profile', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findOne({ username: req.user.username })
-      .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits -_id');
+// Get User Profile
+app.get("/api/user/profile", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+  const user = auth.user;
+  try {
+    const profile = await User.findOne({ username: user.username })
+      .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits analyses _id');
 
     res.status(200).json({
-      username: user.username,
-      email: user.email,
-      name: user.name || user.username,
-      avatar: user.avatar,
-      age: user.age,
-      phoneNumber: user.phoneNumber,
-      followUpRequired: user.followUpRequired,
-      AppointmentApproved: user.AppointmentApproved,
-      appointments: user.appointments,
-      visits: user.visits
+      username: profile.username,
+      email: profile.email,
+      name: profile.name || profile.username,
+      avatar: profile.avatar,
+      age: profile.age,
+      phoneNumber: profile.phoneNumber,
+      followUpRequired: profile.followUpRequired,
+      AppointmentApproved: profile.AppointmentApproved,
+      appointments: profile.appointments,
+      visits: profile.visits,
+      analyses: profile.analyses,
+      _id: profile._id
     });
   } catch (error) {
-    console.error('Error fetching profile:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error("Error fetching profile:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
-app.put('/api/user/profile', authMiddleware, [
-  body('name').trim().isLength({ min: 1 }).escape(),
-  body('email').isEmail().normalizeEmail(),
-  body('avatar').optional().isURL(),
-  body('age').optional().isInt({ min: 1, max: 120 }),
-  body('phoneNumber').optional().isMobilePhone('any')
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
+// Update User Profile
+app.put("/api/user/profile", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
+  const { name, email, avatar, age, phoneNumber } = req.body;
+
+  if (!name || !email) {
+    return res.status(400).json({ error: "Name and email are required" });
   }
 
-  const { name, email, avatar, age, phoneNumber } = req.body;
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: "Invalid email format" });
+  }
+
+  if (age && (isNaN(age) || age < 1 || age > 120)) {
+    return res.status(400).json({ error: "Age must be a number between 1 and 120" });
+  }
+
+  if (phoneNumber && !/^\+?[1-9]\d{1,14}$/.test(phoneNumber)) {
+    return res.status(400).json({ error: "Invalid phone number format" });
+  }
 
   try {
     const emailInUse = await User.findOne({
       email,
-      username: { $ne: req.user.username }
+      username: { $ne: user.username }
     });
     if (emailInUse) {
-      return res.status(400).json({ error: 'Email already in use' });
+      return res.status(400).json({ error: "Email already in use" });
     }
 
     if (phoneNumber) {
       const phoneInUse = await User.findOne({
         phoneNumber,
-        username: { $ne: req.user.username }
+        username: { $ne: user.username }
       });
       if (phoneInUse) {
-        return res.status(400).json({ error: 'Phone number already in use' });
+        return res.status(400).json({ error: "Phone number already in use" });
       }
     }
 
     const updatedUser = await User.findOneAndUpdate(
-      { username: req.user.username },
+      { username: user.username },
       { name, email, avatar, age, phoneNumber },
       { new: true, runValidators: true }
-    ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments -_id');
-
-    if (!updatedUser) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments analyses _id');
 
     res.status(200).json({
-      message: 'Profile updated successfully',
+      message: "Profile updated successfully",
       username: updatedUser.username,
       email: updatedUser.email,
       name: updatedUser.name,
@@ -844,65 +837,110 @@ app.put('/api/user/profile', authMiddleware, [
       phoneNumber: updatedUser.phoneNumber,
       followUpRequired: updatedUser.followUpRequired,
       AppointmentApproved: updatedUser.AppointmentApproved,
-      appointments: updatedUser.appointments
+      appointments: updatedUser.appointments,
+      analyses: updatedUser.analyses,
+      _id: updatedUser._id
     });
   } catch (error) {
-    console.error('Error updating profile:', error);
+    console.error("Error updating profile:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
+// Upload Avatar Route
+app.post("/api/user/upload-avatar", imageUpload.single('avatar'), async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'Avatar image is required' });
+  }
+
+  try {
+    const avatarPath = `/uploads/${req.file.filename}`;
+    const updatedUser = await User.findOneAndUpdate(
+      { username: user.username },
+      { avatar: avatarPath },
+      { new: true }
+    ).select('username email name avatar age phoneNumber _id');
+
+    res.status(200).json({
+      message: 'Avatar uploaded successfully',
+      avatar: avatarPath,
+      user: {
+        username: updatedUser.username,
+        email: updatedUser.email,
+        name: updatedUser.name,
+        avatar: updatedUser.avatar,
+        age: updatedUser.age,
+        phoneNumber: updatedUser.phoneNumber,
+        _id: updatedUser._id
+      }
+    });
+  } catch (error) {
+    console.error('Error uploading avatar:', error);
+    if (fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
 // Send SMS Route
-app.post('/api/send-sms', authMiddleware, [
-  body('phoneNumber').isMobilePhone('any'),
-  body('date').isString().notEmpty(),
-  body('time').isString().notEmpty()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+app.post("/api/send-sms", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
+  const user = auth.user;
   const { phoneNumber, date, time } = req.body;
 
+  if (!phoneNumber || !date || !time) {
+    return res.status(400).json({ error: "Phone number, date, and time are required" });
+  }
+
+  const phoneRegex = /^\+[1-9]\d{1,14}$/;
+  if (!phoneRegex.test(phoneNumber)) {
+    return res.status(400).json({ error: "Invalid phone number format. Must include country code (e.g., +91)" });
+  }
+
   try {
-    const user = await User.findOne({ username: req.user.username });
-    if (!user || user.phoneNumber !== phoneNumber.replace('+91', '')) {
-      return res.status(403).json({ error: 'Phone number does not match user profile' });
+    if (user.phoneNumber !== phoneNumber.replace('+91', '')) {
+      return res.status(403).json({ error: "Phone number does not match user profile" });
     }
 
     const messageBody = `Hi, just a reminder: you’re set to see Dr. Prashik on ${date} at ${time}`;
 
     const message = await client.messages.create({
       body: messageBody,
-      from: env.TWILIO_PHONE_NUMBER,
+      from: process.env.TWILIO_PHONE_NUMBER,
       to: phoneNumber
     });
 
     console.log('SMS sent:', message.sid);
-    res.status(200).json({ message: 'SMS sent successfully', sid: message.sid });
+    res.status(200).json({ message: "SMS sent successfully", sid: message.sid });
   } catch (error) {
-    console.error('Twilio error:', error);
-    res.status(500).json({ error: 'Failed to send SMS', details: error.message });
+    console.error("Twilio error:", error);
+    res.status(500).json({ error: "Failed to send SMS", details: error.message });
   }
 });
 
 // Approve Appointment Route
-app.patch('/api/user/approve-appointment', authMiddleware, [
-  body('date').isString().notEmpty(),
-  body('time').isString().notEmpty(),
-  body('doctor').isString().notEmpty()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+app.patch("/api/user/approve-appointment", async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
+  const user = auth.user;
   const { date, time, doctor } = req.body;
 
+  if (!date || !time || !doctor) {
+    return res.status(400).json({ error: "Date, time, and doctor are required" });
+  }
+
   try {
-    const user = await User.findOneAndUpdate(
-      { username: req.user.username },
+    const updatedUser = await User.findOneAndUpdate(
+      { username: user.username },
       {
         $set: { AppointmentApproved: true },
         $push: {
@@ -915,37 +953,35 @@ app.patch('/api/user/approve-appointment', authMiddleware, [
         }
       },
       { new: true, runValidators: true }
-    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments analyses _id');
 
     res.status(200).json({
-      message: 'Appointment approved and saved successfully',
+      message: "Appointment approved and saved successfully",
       user: {
-        username: user.username,
-        email: user.email,
-        phoneNumber: user.phoneNumber,
-        AppointmentApproved: user.AppointmentApproved,
-        followUpRequired: user.followUpRequired,
-        appointments: user.appointments
+        username: updatedUser.username,
+        email: updatedUser.email,
+        phoneNumber: updatedUser.phoneNumber,
+        AppointmentApproved: updatedUser.AppointmentApproved,
+        followUpRequired: updatedUser.followUpRequired,
+        appointments: updatedUser.appointments,
+        analyses: updatedUser.analyses,
+        _id: updatedUser._id
       }
     });
   } catch (error) {
-    console.error('Error approving appointment:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    console.error("Error approving appointment:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Session Management Routes
-app.get('/api/session/active', authMiddleware, async (req, res) => {
+// Get Active Session
+app.get('/api/session/active', async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
+
+  const user = auth.user;
   try {
-    const user = await User.findOne({ username: req.user.username })
-      .select('session');
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
     res.status(200).json({
       active: user.session.sessionActive,
       question: user.session.question,
@@ -957,16 +993,16 @@ app.get('/api/session/active', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/session/start', authMiddleware, [
-  body('userId').isMongoId(),
-  body('question').isString().notEmpty()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+// Start Session
+app.post('/api/session/start', async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
   const { userId, question } = req.body;
+
+  if (!userId || !question) {
+    return res.status(400).json({ error: 'User ID and question are required' });
+  }
 
   try {
     const user = await User.findById(userId);
@@ -1001,28 +1037,23 @@ app.post('/api/session/start', authMiddleware, [
   }
 });
 
-app.post('/api/session/record_response', authMiddleware, upload.single('file'), [
-  body('question').isString().notEmpty(),
-  body('language').isString().notEmpty()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    return res.status(400).json({ errors: errors.array() });
-  }
+// Record Session Response
+app.post('/api/session/record_response', audioUpload.single('file'), async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
+  const user = auth.user;
   const { question, language } = req.body;
+
   if (!req.file) {
     return res.status(400).json({ error: 'Audio file is required' });
   }
 
-  try {
-    const user = await User.findOne({ username: req.user.username });
-    if (!user) {
-      fs.unlinkSync(req.file.path);
-      return res.status(404).json({ error: 'User not found' });
-    }
+  if (!question || !language) {
+    return res.status(400).json({ error: 'Question and language are required' });
+  }
 
+  try {
     if (!user.session.sessionActive || user.session.question !== question) {
       fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'No active session or invalid question' });
@@ -1045,7 +1076,7 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
 
     res.status(200).json({ message: 'Response recorded successfully' });
   } catch (error) {
-    if (req.file && fs.existsSync(req.file.path)) {
+    if (fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     console.error('Error recording response:', error);
@@ -1053,7 +1084,11 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
   }
 });
 
-app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
+// Get Session Responses
+app.get('/api/session/responses/:userId', async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
+
   const { userId } = req.params;
 
   try {
@@ -1080,16 +1115,16 @@ app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/session/save_analysis', authMiddleware, [
-  body('userId').isMongoId(),
-  body('analysis').isObject()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+// Save Session Analysis
+app.post('/api/session/save_analysis', async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
   const { userId, analysis } = req.body;
+
+  if (!userId || !analysis) {
+    return res.status(400).json({ error: 'User ID and analysis data are required' });
+  }
 
   try {
     const user = await User.findById(userId);
@@ -1107,6 +1142,7 @@ app.post('/api/session/save_analysis', authMiddleware, [
     const analysesToSave = analysis.transcriptions.map((transcription, index) => ({
       transcription: transcription.text,
       analysis: analysis.individual_analyses[index],
+      tags: ['session-analysis'],
       createdAt: new Date()
     }));
 
@@ -1129,14 +1165,13 @@ app.post('/api/session/save_analysis', authMiddleware, [
   }
 });
 
-app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findOne({ username: req.user.username })
-      .select('session.latestAnalysis');
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+// Get Latest Session Analysis
+app.get('/api/session/latest_analysis', async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
+  const user = auth.user;
+  try {
     res.status(200).json({
       analysis: user.session.latestAnalysis
     });
@@ -1146,15 +1181,16 @@ app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/session/end', authMiddleware, [
-  body('userId').isMongoId()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+// End Session
+app.post('/api/session/end', async (req, res) => {
+  const auth = await checkUserCookie(req, res);
+  if (auth.error) return;
 
   const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
 
   try {
     const user = await User.findById(userId);
@@ -1198,20 +1234,5 @@ app.post('/api/session/end', authMiddleware, [
   }
 });
 
-// Health Check Endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', uptime: process.uptime() });
-});
-
-// Global Error Handler
-app.use((err, req, res, next) => {
-  if (req.file && fs.existsSync(req.file.path)) {
-    fs.unlinkSync(req.file.path);
-  }
-  console.error('Unhandled error:', err.stack);
-  res.status(500).json({ error: 'Something went wrong!' });
-});
-
-// Start Server
-const PORT = env.PORT1;
-app.listen(PORT, () => console.log(`Server running on port ${PORT} in ${env.isProd ? 'production' : 'development'} mode`));
+const PORT = process.env.PORT1 || 5001;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
