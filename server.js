@@ -72,15 +72,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
 
-// Set CORS headers explicitly
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
-  next();
-});
-
 // Initialize EmailJS
 emailjs.init({
   publicKey: process.env.EMAILJS_PUBLIC_KEY,
@@ -345,9 +336,9 @@ app.post("/register", async (req, res) => {
 
     // Set cookie for authentication
     res.cookie('username', username, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
@@ -385,15 +376,13 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    // Set cookie for authentication
     res.cookie('username', username, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production' ,
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
-
     console.log(`Login successful for ${username}, Cookie set: ${username}`);
     res.status(200).json({
       message: "Login successful",
@@ -415,16 +404,19 @@ app.post("/login", async (req, res) => {
 // Logout Route
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
-    httpOnly: false,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
-    path: '/'
+       httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+      path: '/'
   });
   console.log('Logout successful, cookie cleared');
   res.status(200).json({ message: "Logout successful" });
 });
 
 // Google Login Endpoint
+app.get('/auth', (req, res) => {
+  res.status(200).json({ message: 'Auth endpoint for cookie trust' });
+});
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
   try {
@@ -460,11 +452,10 @@ app.post('/google-login', async (req, res) => {
       await user.save();
     }
 
-    // Set cookie for authentication
-    res.cookie('username', user.username, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+    res.cookie('username', username, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
       path: '/',
       maxAge: 24 * 60 * 60 * 1000
     });
