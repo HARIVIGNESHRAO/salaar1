@@ -115,7 +115,8 @@ const userSchema = new mongoose.Schema({
     date: { type: String, required: true },
     time: { type: String, required: true },
     doctor: { type: String, required: true },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+    status: { type: String, enum: ['Scheduled', 'Rescheduled', 'Cancelled'], default: 'Scheduled' }
   }],
   analyses: [{
     transcription: { type: String },
@@ -124,7 +125,6 @@ const userSchema = new mongoose.Schema({
       Reasons: String,
       Suggestions: [String],
     },
-    tags: [{ type: String }],
     createdAt: { type: Date, default: Date.now }
   }],
   session: {
@@ -138,16 +138,7 @@ const userSchema = new mongoose.Schema({
       createdAt: { type: Date, default: Date.now }
     }],
     latestAnalysis: {
-      transcriptions: [{
-        question: String,
-        text: String
-      }],
-      individual_analyses: [{
-        Emotions: [String],
-        Tones: [String],
-        Reasons: String,
-        Suggestions: [String]
-      }],
+      questions: [String],
       combined_analysis: String,
       createdAt: { type: Date }
     },
@@ -233,6 +224,25 @@ const checkUserCookie = async (req, res) => {
   }
 };
 
+// Authentication Middleware
+const authMiddleware = async (req, res, next) => {
+  try {
+    const username = req.cookies.username;
+    if (!username) {
+      return res.status(401).json({ error: "Please log in first" });
+    }
+
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: "Authentication error: " + error.message });
+  }
+};
 // Twilio Client Setup
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
@@ -494,43 +504,93 @@ app.post('/google-login', async (req, res) => {
 
 // Save Analysis Route
 app.post('/save_analysis', async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
   try {
-    const { transcriptions, analyses } = req.body;
-    const user = auth.user;
+    const { userId, transcriptions, analyses, questions, combinedAnalysis } = req.body;
 
-    if (!transcriptions || !analyses || transcriptions.length !== analyses.length || transcriptions.length === 0) {
-      return res.status(400).json({ error: 'Both transcriptions and analyses are required and must match in length' });
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
     }
 
-    const analysesToSave = transcriptions.map((transcription, index) => ({
-      transcription,
-      analysis: analyses[index],
-      tags: ['user-generated'],
-      createdAt: new Date()
+    if (!transcriptions || !analyses || !questions || transcriptions.length !== analyses.length || transcriptions.length !== questions.length || transcriptions.length === 0) {
+      return res.status(400).json({ error: 'Transcriptions, analyses, and questions are required and must match in length' });
+    }
+
+    if (!combinedAnalysis) {
+      return res.status(400).json({ error: 'Combined analysis is required' });
+    }
+
+    const transcriptionsToSave = transcriptions.map((text, index) => ({
+      question: questions[index],
+      text
     }));
 
-    const updatedUser = await User.findOneAndUpdate(
-      { username: user.username },
+    const analysisData = {
+      transcriptions: transcriptionsToSave,
+      individual_analyses: analyses,
+      combined_analysis: combinedAnalysis,
+      createdAt: new Date()
+    };
+
+    const user = await User.findByIdAndUpdate(
+      userId,
       {
-        $push: {
-          analyses: { $each: analysesToSave }
+        $set: {
+          'session.latestAnalysis': analysisData,
+          'session.updatedAt': new Date()
         },
         $inc: { visits: 1 }
       },
       { new: true }
     );
 
-    if (!updatedUser) {
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.status(200).json({ message: 'Analyses saved successfully', visits: updatedUser.visits });
+    res.status(200).json({ message: 'Analysis saved successfully', visits: user.visits });
   } catch (error) {
-    console.error('Error saving analyses:', error);
-    res.status(500).json({ error: 'Failed to save analyses' });
+    console.error('Error saving analysis:', error);
+    res.status(500).json({ error: 'Failed to save analysis' });
+  }
+});
+app.get('/users/username/latest_analysis', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username })
+      .select('session.latestAnalysis');
+    if (!user || !user.session || !user.session.latestAnalysis) {
+      return res.status(404).json({ success: false, message: 'No latest analysis found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        _id: user.session.latestAnalysis._id || 'latest',
+        combined_analysis: user.session.latestAnalysis.combined_analysis,
+        createdAt: user.session.latestAnalysis.createdAt,
+        questions: user.session.latestAnalysis.questions // Optional
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching latest analysis:', error);
+    res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+  }
+});
+
+// Delete Latest Analysis
+app.delete('/users/username/latest_analysis', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || !user.session || !user.session.latestAnalysis) {
+      return res.status(404).json({ success: false, message: 'No latest analysis found' });
+    }
+
+    user.session.latestAnalysis = null;
+    await user.save();
+
+    res.status(200).json({ success: true, message: 'Latest analysis deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting latest analysis:', error);
+    res.status(500).json({ success: false, message: 'Server error: ' + error.message });
   }
 });
 
@@ -931,12 +991,7 @@ app.post("/api/send-sms", async (req, res) => {
   }
 });
 
-// Approve Appointment Route
-app.patch("/api/user/approve-appointment", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
-  const user = auth.user;
+app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
   const { date, time, doctor } = req.body;
 
   if (!date || !time || !doctor) {
@@ -944,8 +999,8 @@ app.patch("/api/user/approve-appointment", async (req, res) => {
   }
 
   try {
-    const updatedUser = await User.findOneAndUpdate(
-      { username: user.username },
+    const user = await User.findOneAndUpdate(
+      { username: req.user.username },
       {
         $set: { AppointmentApproved: true },
         $push: {
@@ -953,24 +1008,27 @@ app.patch("/api/user/approve-appointment", async (req, res) => {
             date,
             time,
             doctor,
+            status: 'Scheduled',
             createdAt: new Date()
           }
         }
       },
       { new: true, runValidators: true }
-    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments analyses _id');
+    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
     res.status(200).json({
       message: "Appointment approved and saved successfully",
       user: {
-        username: updatedUser.username,
-        email: updatedUser.email,
-        phoneNumber: updatedUser.phoneNumber,
-        AppointmentApproved: updatedUser.AppointmentApproved,
-        followUpRequired: updatedUser.followUpRequired,
-        appointments: updatedUser.appointments,
-        analyses: updatedUser.analyses,
-        _id: updatedUser._id
+        username: user.username,
+        email: user.email,
+        phoneNumber: user.phoneNumber,
+        AppointmentApproved: user.AppointmentApproved,
+        followUpRequired: user.followUpRequired,
+        appointments: user.appointments
       }
     });
   } catch (error) {
@@ -978,6 +1036,126 @@ app.patch("/api/user/approve-appointment", async (req, res) => {
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
+
+// Reschedule Appointment Route
+app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
+  const { userId, appointmentIndex, newDate, newTime } = req.body;
+
+  if (!userId || appointmentIndex === undefined || !newDate || !newTime) {
+    return res.status(400).json({ error: "User ID, appointment index, new date, and new time are required" });
+  }
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!user.appointments || user.appointments.length <= appointmentIndex) {
+      return res.status(404).json({ error: "Appointment not found" });
+    }
+
+    // Update appointment
+    user.appointments[appointmentIndex] = {
+      ...user.appointments[appointmentIndex].toObject(), // Convert to plain object
+      date: newDate,
+      time: newTime,
+      status: 'Rescheduled',
+      createdAt: new Date()
+    };
+
+    await user.save();
+
+    // Send SMS notification if phone number exists
+    if (user.phoneNumber) {
+      let formattedPhoneNumber = user.phoneNumber;
+      // Ensure phone number doesn't already include country code
+        console.log(formattedPhoneNumber);
+      if (!formattedPhoneNumber.startsWith('+')) {
+        formattedPhoneNumber = `+91${formattedPhoneNumber}`;
+      }
+      try {
+        await client.messages.create({
+          body: `Hi, your appointment with Dr. Prashik has been rescheduled to ${newDate} at ${newTime}`,
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: formattedPhoneNumber
+        });
+      } catch (smsError) {
+        console.error("Failed to send SMS:", smsError.message);
+        // Continue despite SMS failure
+      }
+    }
+
+    res.status(200).json({
+      message: "Appointment rescheduled successfully",
+      appointment: user.appointments[appointmentIndex]
+    });
+  } catch (error) {
+    console.error("Error rescheduling appointment:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
+// Cancel Appointment Route
+app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
+  const { userId, appointmentIndex } = req.body;
+
+  if (!userId || appointmentIndex === undefined) {
+    return res.status(400).json({ error: "User ID and appointment index are required" });
+  }
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!user.appointments || user.appointments.length <= appointmentIndex) {
+      return res.status(404).json({ error: "Appointment not found" });
+    }
+
+    const cancelledAppointment = user.appointments[appointmentIndex].toObject();
+    // Update appointment status
+    user.appointments[appointmentIndex] = {
+      ...cancelledAppointment,
+      status: 'Cancelled'
+    };
+
+    // Check if there are any non-cancelled appointments left
+    const hasActiveAppointments = user.appointments.some(appt => appt.status !== 'Cancelled');
+    user.AppointmentApproved = hasActiveAppointments;
+
+    await user.save();
+
+    // Send SMS notification if phone number exists
+    if (user.phoneNumber) {
+      let formattedPhoneNumber = user.phoneNumber;
+      if (!formattedPhoneNumber.startsWith('+')) {
+        formattedPhoneNumber = `+91${formattedPhoneNumber}`;
+      }
+      try {
+        await client.messages.create({
+          body: `Hi, your appointment with Dr. Prashik on ${cancelledAppointment.date} at ${cancelledAppointment.time} has been cancelled`,
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: formattedPhoneNumber
+        });
+      } catch (smsError) {
+        console.error("Failed to send SMS:", smsError.message);
+        // Continue despite SMS failure
+      }
+    }
+
+    res.status(200).json({
+      message: "Appointment cancelled successfully",
+      appointments: user.appointments,
+      AppointmentApproved: user.AppointmentApproved
+    });
+  } catch (error) {
+    console.error("Error cancelling appointment:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
 
 // Session Management Routes
 // Get Active Session
@@ -1121,14 +1299,15 @@ app.get('/api/session/responses/:userId', async (req, res) => {
 });
 
 // Save Session Analysis
-app.post('/api/session/save_analysis', async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
+app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
+  const { userId, questions, combinedAnalysis } = req.body;
 
-  const { userId, analysis } = req.body;
+  if (!userId || !questions || !combinedAnalysis) {
+    return res.status(400).json({ error: 'User ID, questions, and combined analysis are required' });
+  }
 
-  if (!userId || !analysis) {
-    return res.status(400).json({ error: 'User ID and analysis data are required' });
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return res.status(400).json({ error: 'Questions must be a non-empty array' });
   }
 
   try {
@@ -1137,23 +1316,16 @@ app.post('/api/session/save_analysis', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Save analysis to session
     user.session.latestAnalysis = {
-      transcriptions: analysis.transcriptions,
-      individual_analyses: analysis.individual_analyses,
-      combined_analysis: analysis.combined_analysis,
+      questions,
+      combined_analysis: combinedAnalysis,
       createdAt: new Date()
     };
 
-    const analysesToSave = analysis.transcriptions.map((transcription, index) => ({
-      transcription: transcription.text,
-      analysis: analysis.individual_analyses[index],
-      tags: ['session-analysis'],
-      createdAt: new Date()
-    }));
-
-    user.analyses.push(...analysesToSave);
     user.visits += 1;
 
+    // Clean up response audio files
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
         fs.unlinkSync(response.audioPath);
@@ -1163,7 +1335,7 @@ app.post('/api/session/save_analysis', async (req, res) => {
     user.session.responses = [];
     await user.save();
 
-    res.status(200).json({ message: 'Analysis saved successfully' });
+    res.status(200).json({ message: 'Analysis saved successfully', visits: user.visits });
   } catch (error) {
     console.error('Error saving session analysis:', error);
     res.status(500).json({ error: 'Server error: ' + error.message });
@@ -1171,12 +1343,14 @@ app.post('/api/session/save_analysis', async (req, res) => {
 });
 
 // Get Latest Session Analysis
-app.get('/api/session/latest_analysis', async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
-  const user = auth.user;
+app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
   try {
+    const user = await User.findOne({ username: req.user.username })
+      .select('session.latestAnalysis');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
     res.status(200).json({
       analysis: user.session.latestAnalysis
     });
@@ -1185,12 +1359,37 @@ app.get('/api/session/latest_analysis', async (req, res) => {
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
+app.get('/api/session/latest_analysis1', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.username })
+      .select('session.latestAnalysis');
+    if (!user) {
+      console.log('User not found for username:', req.user.username);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!user.session || !user.session.latestAnalysis) {
+      console.log('No latest analysis for user:', req.user.username);
+      return res.status(404).json({ error: 'No latest analysis available' });
+    }
+
+    const response = {
+      analysis: {
+        questions: user.session.latestAnalysis.questions || [],
+        combined_analysis: user.session.latestAnalysis.combined_analysis || 'Not provided',
+        createdAt: user.session.latestAnalysis.createdAt || new Date()
+      }
+    };
+    console.log('Sending latest analysis for user:', req.user.username, response);
+    res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching latest analysis:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
 
 // End Session
-app.post('/api/session/end', async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
+app.post('/api/session/end', authMiddleware, async (req, res) => {
   const { userId } = req.body;
 
   if (!userId) {
@@ -1207,6 +1406,7 @@ app.post('/api/session/end', async (req, res) => {
       return res.status(400).json({ error: 'No active session for this user' });
     }
 
+    // Clean up response audio files
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
         fs.unlinkSync(response.audioPath);
