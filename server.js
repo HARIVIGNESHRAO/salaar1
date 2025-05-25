@@ -450,7 +450,7 @@ app.post('/google-login', async (req, res) => {
 
     let user = await User.findOne({ googleId });
     if (!user) {
-      const username = email.split('@')[0] + Math.floor(Math.random() * 1000);
+      const username = name;
       console.log('Generated username:', username); // Log the generated username
       const existingUser = await User.findOne({ $or: [{ username }, { email }] });
       if (existingUser) {
