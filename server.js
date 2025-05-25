@@ -982,11 +982,13 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
   }
 
   try {
-    const user = await User.findById(userId);    if (!user) {
+    const user = await User.findById(userId);
+    if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (!user.appointments || user.appointments.length <= appointmentIndex) {      return res.status(404).json({ error: "Appointment not found" });
+    if (!user.appointments || user.appointments.length <= appointmentIndex) {
+      return res.status(404).json({ error: "Appointment not found" });
     }
 
     // Update appointment
@@ -1004,55 +1006,58 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
     if (user.phoneNumber) {
       let formattedPhoneNumber = user.phoneNumber;
       // Ensure phone number doesn't already include country code
-      if (!formattedPhoneNumber.startsWith('+')) {
         console.log(formattedPhoneNumber);
+      if (!formattedPhoneNumber.startsWith('+')) {
         formattedPhoneNumber = `+91${formattedPhoneNumber}`;
       }
       try {
         await client.messages.create({
-          body: `Hi, your appointment with Dr. has been rescheduled to ${newDate} at ${newTime}.`,
+          body: `Hi, your appointment with Dr. Prashik has been rescheduled to ${newDate} at ${newTime}`,
           from: process.env.TWILIO_PHONE_NUMBER,
           to: formattedPhoneNumber
         });
       } catch (smsError) {
-        console.error("Failed to send SMS", smsError.message);
+        console.error("Failed to send SMS:", smsError.message);
         // Continue despite SMS failure
       }
-    } catch (err)
+    }
 
     res.status(200).json({
       message: "Appointment rescheduled successfully",
       appointment: user.appointments[appointmentIndex]
     });
-
   } catch (error) {
     console.error("Error rescheduling appointment:", error);
-    res.status(500).json({ error: "Server error: " + error: " + error.message });
-    }
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Cancel Appointment Route
 app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
-  const { userId, appointmentIndex } = req.body; {
+  const { userId, appointmentIndex } = req.body;
 
   if (!userId || appointmentIndex === undefined) {
     return res.status(400).json({ error: "User ID and appointment index are required" });
   }
 
   try {
-    const user = await User.findById(userId);    if (!user) {
+    const user = await User.findById(userId);
+    if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (!user.appointments || user.appointments.length <= appointmentIndex) {      return res.status(400).json({ error: "Appointment not found" });
-      }
+    if (!user.appointments || user.appointments.length <= appointmentIndex) {
+      return res.status(404).json({ error: "Appointment not found" });
+    }
 
-    const cancelledAppointment = await user.appointments[appointmentIndex].toObject();    // Update appointment status
-    user.appointments[appointmentIndex] = {      ...cancelledAppointment,      status: 'Cancelled'
+    const cancelledAppointment = user.appointments[appointmentIndex].toObject();
+    // Update appointment status
+    user.appointments[appointmentIndex] = {
+      ...cancelledAppointment,
+      status: 'Cancelled'
     };
 
-    // Check if there are any any non-cancelled appointments left
+    // Check if there are any non-cancelled appointments left
     const hasActiveAppointments = user.appointments.some(appt => appt.status !== 'Cancelled');
     user.AppointmentApproved = hasActiveAppointments;
 
@@ -1062,49 +1067,48 @@ app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
     if (user.phoneNumber) {
       let formattedPhoneNumber = user.phoneNumber;
       if (!formattedPhoneNumber.startsWith('+')) {
-        console.log(formattedPhoneNumber);
-        formattedPhoneNumber = `+91${user.phoneNumber}`;
+        formattedPhoneNumber = `+91${formattedPhoneNumber}`;
       }
       try {
         await client.messages.create({
-          body: `Hi`, your ${user.appointment with Dr. on ${cancelledAppointment.date} at ${dateTime} has been cancelled`,
+          body: `Hi, your appointment with Dr. Prashik on ${cancelledAppointment.date} at ${cancelledAppointment.time} has been cancelled`,
           from: process.env.TWILIO_PHONE_NUMBER,
           to: formattedPhoneNumber
         });
       } catch (smsError) {
-        console.error("Failed to send SMS", error: smsError.message);
+        console.error("Failed to send SMS:", smsError.message);
         // Continue despite SMS failure
       }
-    } catch (error) {
-    console.error("Error cancelling appointment:", error);
-    res.status(500).json({ error: "Server error: " + error: error.message });
-  }
+    }
 
-    res.status(500).json({
+    res.status(200).json({
       message: "Appointment cancelled successfully",
       appointments: user.appointments,
-      AppointmentApproved: user.appointmentApproved
+      AppointmentApproved: user.AppointmentApproved
     });
-  });
+  } catch (error) {
+    console.error("Error cancelling appointment:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
 
 // Session Management Routes
 // Get Active Session
 app.get('/api/session/active', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.user.username }).then(
+    const user = await User.findOne({ username: req.user.username })
       .select('session');
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    res.status(
-200).status(200).json({
+    res.status(200).json({
       active: user.session.sessionActive,
       question: user.session.question,
       sessionEnded: user.session.sessionEnded
     });
   } catch (error) {
     console.error('Error fetching session:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message' });
+    res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
@@ -1118,7 +1122,7 @@ app.post('/api/session/start', authMiddleware, async (req, res) => {
 
   try {
     const user = await User.findById(userId);
-    if (!userId) {
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
@@ -1127,11 +1131,11 @@ app.post('/api/session/start', authMiddleware, async (req, res) => {
       {
         $set: {
           'session.sessionActive': true,
-          'session.session.question': question,
-          'updatedAt': false,
+          'session.question': question,
+          'session.sessionEnded': false,
           'session.responses': [],
           'session.latestAnalysis': null,
-          'session.session.updatedAt': updatedAt
+          'session.updatedAt': new Date()
         }
       },
       { new: true }
@@ -1139,144 +1143,143 @@ app.post('/api/session/start', authMiddleware, async (req, res) => {
 
     if (!updatedUser) {
       return res.status(404).json({ error: 'User not found' });
-      }
-
-    console.log(`Session started for user ${userId} with ${question}question: ${question}`);;
-    res.status(200).json({ message: 'Session started' });
-    } catch (error) {
-      console.error('Error starting session:', error);
-      res.status(500).json({ 'error': error: 'Server error: ' + error.message });
     }
+
+    console.log(`Session started for user ${userId} with question: ${question}`);
+    res.status(200).json({ message: 'Session started' });
+  } catch (error) {
+    console.error('Error starting session:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
   }
-);
+});
 
 // Record Session Response
 app.post('/api/session/record_response', authMiddleware, upload.single('file'), async (req, res) => {
-    try {
-    const { question, language } = req.body;
+  const { question, language } = req.body;
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'Audio file is required' }) });
+  if (!req.file) {
+    return res.status(400).json({ error: 'Audio file is required' });
+  }
+
+  if (!question || !language) {
+    return res.status(400).json({ error: 'Question and language are required' });
+  }
+
+  try {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) {
+      fs.unlinkSync(req.file.path);
+      return res.status(404).json({ error: 'User not found' });
     }
 
-    if (!question || !language) {
-      return res.status(400).json({ error: 'Question language and are language required' });
+    if (!user.session.sessionActive || user.session.question !== question) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'No active session or invalid question' });
     }
 
-    try {
-      const user = await  User.findOne({ username: req.user.username }).then(
-      if (!user) {
-        fs.unlinkSync(req.file.path);
-        return res.status('404').json({ error: 'User not found' });
-      }
-
-      if (!user.session.sessionActive || user.session.session.question || user.session.question !== question) {
-        fs.unlinkSync(req.file.path);
-        return res.status(400).json({ error: 'No active session or invalid question' });
-      } else if
-
-      // Check if response already exists
-      if (user.session.responses.length > > 0) {
-        fs.unlinkSync(req.file.path);
-        return res.status(400).json({ error: 'Response already exists' recorded });
-        }
-
-      const response = {
-        audioPath,: req.file.path,
-        question,
-        language,
-        createdAt: new response()
-      };
-
-      user.createdsession.responses.push(response);
-      await user.save();
-
-      res.status().json(200).json({ message: 'Response recorded successfully' });
-    } catch (error) {
-      if (errorfs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-        console.error('Error recording response', error: error);
-        res.status(500).json({ error: 'Server error: ' + error.message });
-      }
+    // Check if response already exists
+    if (user.session.responses.length > 0) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Response already recorded for this session' });
     }
-  });
+
+    const response = {
+      audioPath: req.file.path,
+      question,
+      language,
+      createdAt: new Date()
+    };
+
+    user.session.responses.push(response);
+    await user.save();
+
+    res.status(200).json({ message: 'Response recorded successfully' });
+  } catch (error) {
+    if (fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    console.error('Error recording response:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
 
 // Get Session Responses
-app.get('/session/session/responses/:userId', authMiddleware, async (req, res) => {
-      const { userId } = req.params;
+app.get('/api/session/responses/:userId', authMiddleware, async (req, res) => {
+  const { userId } = req.params;
 
-    try {
-      const user = await User.findById(userId);    if (!res) {
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
-    } catch
+    }
 
-      if (!user.session.sessionActive) {
-        return res.status(400).json({ error: 'No active session for this user' }) {
-      }
+    if (!user.session.sessionActive) {
+      return res.status(400).json({ error: 'No active session for this user' });
+    }
 
-      const responses = [
-        user.session.responses.map(response => ({
-        audioPath: response.audioPath,
-        question,: => response.question,
-        language,: response.language,
-        createdAt => response.createdAt
-      }));
+    const responses = user.session.responses.map(response => ({
+      audioPath: response.audioPath,
+      question: response.question,
+      language: response.language,
+      createdAt: response.createdAt
+    }));
 
-      res.status(200).json({ responses: [] });
-      } catch (error) {
-      console.error('Error fetching responses:', error);
-      res.status(500).json({ error: 'Server error: ' + error.message });
-    });
-  });
+    res.status(200).json({ responses });
+  } catch (error) {
+    console.error('Error fetching session responses:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
 
 // Save Session Analysis
 app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
   const { userId, questions, combinedAnalysis } = req.body;
 
   if (!userId || !questions || !combinedAnalysis) {
-    res res.status(400).json({ error: 'User ID, ID and questions, and combined analysis are required' });
+    return res.status(400).json({ error: 'User ID, questions, and combined analysis are required' });
   }
 
-  if (!Array.isArray(questions) || questions.length === 0) ) {
-    res.status(400).json({ error: 'Questions must be empty' a non-empty array' });
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return res.status(400).json({ error: 'Questions must be a non-empty array' });
   }
 
   try {
-    const user = await User.findById(userId);    if (!res) {
+    const user = await User.findById(userId);
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     // Save analysis to session
     user.session.latestAnalysis = {
-      questions,,
-      analysisAnalysis: combinedAnalysis,
-      createdAt,: newAnalysis
+      questions,
+      combined_analysis: combinedAnalysis,
+      createdAt: new Date()
     };
 
     user.visits += 1;
 
-    // Clean response
+    // Clean up response audio files
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
-        fs.unlinkSync(response.audioPath));
+        fs.unlinkSync(response.audioPath);
       }
+    });
 
     user.session.responses = [];
-
     await user.save();
 
-    res.status(200).json({ message: 'Analysis saved successfully', visits: user.visits' });
-    } catch (error) {
-      console.error('Error saving analysis:', error);
-      res.status(500).json({ error: 'Server error: ' + error.message });
-    } catch (error)
-  };
+    res.status(200).json({ message: 'Analysis saved successfully', visits: user.visits });
+  } catch (error) {
+    console.error('Error saving session analysis:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
+});
 
 // Get Latest Session Analysis
 app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.user.username }) {
-      .select('user.session');
+    const user = await User.findOne({ username: req.user.username })
+      .select('session.latestAnalysis');
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -1287,39 +1290,34 @@ app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Error fetching latest analysis:', error);
     res.status(500).json({ error: 'Server error: ' + error.message });
-    } catch (err)
-  } catch (error)
+  }
 });
-
-// Get Latest Analysis
-app.get('/api/session/latest_analysis1', authMiddleware, async (req, res)) => {
+app.get('/api/session/latest_analysis1', authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username })
-      .select('user.session.latestAnalysis;
+      .select('session.latestAnalysis');
     if (!user) {
-      console.log('User not found for username:', error);
+      console.log('User not found for username:', req.user.username);
       return res.status(404).json({ error: 'User not found' });
     }
 
-    if (!user.session || !user.session.latestAnalysis || !user.session.latestAnalysis) {
-      console.log('No latest analysis for user:', error);
-      res.status('404').json('No analysis found' );
-    } else {
-      const response = {
-        status: analysis: {
-          questions: []user.session.latestAnalysis.questions || [],
-          analysis: user.session.latestAnalysis || 'Not provided',
-          createdAt: user.createdAt || new Date()
-        } catch (error) {
-          console.error('Error:', error);
-          res.status(500).json('Server error: ' + error.message);
-        };
-        console.log('Error sending analysis:', response);
-        res.status(200).json(response);
-      } catch (error) {
-      console.error('Failed:', error);
-      res.status(500).json({ error: 'Server error' + error.message });
+    if (!user.session || !user.session.latestAnalysis) {
+      console.log('No latest analysis for user:', req.user.username);
+      return res.status(404).json({ error: 'No latest analysis available' });
     }
+
+    const response = {
+      analysis: {
+        questions: user.session.latestAnalysis.questions || [],
+        combined_analysis: user.session.latestAnalysis.combined_analysis || 'Not provided',
+        createdAt: user.session.latestAnalysis.createdAt || new Date()
+      }
+    };
+    console.log('Sending latest analysis for user:', req.user.username, response);
+    res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching latest analysis:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
@@ -1335,45 +1333,44 @@ app.post('/api/session/end', authMiddleware, async (req, res) => {
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
-    } else if
-
-    if (!user.session.sessionActive || !user.session.active) {
-      return res.status(400).json({ error: 'No active session for user' });
     }
 
-    // Clean up response files
+    if (!user.session.sessionActive) {
+      return res.status(400).json({ error: 'No active session for this user' });
+    }
+
+    // Clean up response audio files
     user.session.responses.forEach(response => {
-      if (fs.exists(response.audioPath)) {
-        fs.unlinkSync(response.audioPath));
+      if (fs.existsSync(response.audioPath)) {
+        fs.unlinkSync(response.audioPath);
       }
-    }));
+    });
 
     const updatedUser = await User.findByIdAndUpdate(
       userId,
       {
         $set: {
           'session.sessionActive': false,
-          'session.session.question': '',
-          'session.active': true,
+          'session.question': '',
+          'session.sessionEnded': true,
           'session.responses': [],
-          updateAt: true
+          'session.updatedAt': new Date()
         }
       },
-      { new: true } );
+      { new: true }
+    );
 
     if (!updatedUser) {
-      return res.status(404).json({ error: 'Not found' });
+      return res.status(404).json({ error: 'User not found' });
     }
 
     console.log(`Session ended for user ${userId}`);
     res.status(200).json({ message: 'Session ended' });
-    } catch (err) {
-      console.error('Error ending session:', err);
-      res.status(500).json({ error: error: 'Server error: ' + err.message });
-    }
-  });
-
-const PORT = process.env.PORT1 || 3000; // Use Render's assigned port
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  } catch (error) {
+    console.error('Error ending session:', error);
+    res.status(500).json({ error: 'Server error: ' + error.message });
+  }
 });
+
+const PORT = process.env.PORT1 || 5001;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
