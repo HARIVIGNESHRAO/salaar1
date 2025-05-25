@@ -992,8 +992,8 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
     // Update appointment
     user.appointments[appointmentIndex] = {
       ...user.appointments[appointmentIndex].toObject(), // Convert to plain object
-      date,: newDate,
-      time,: newTime,
+      date: newDate,
+      time: newTime,
       status: 'Rescheduled',
       createdAt: new Date()
     };
