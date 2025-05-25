@@ -1015,7 +1015,7 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
           to: formattedPhoneNumber
         });
       } catch (smsError) {
-        console.error("Failed to send SMS", error: smsError.message);
+        console.error("Failed to send SMS", smsError.message);
         // Continue despite SMS failure
       }
     } catch (err)
