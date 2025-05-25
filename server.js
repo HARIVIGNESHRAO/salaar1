@@ -27,8 +27,7 @@ const requiredEnvVars = [
   'EMAILJS_PRIVATE_KEY',
   'EMAILJS_SERVICE_ID',
   'EMAILJS_TEMPLATE_ID',
-  'FRONTEND_URL',
-  'BACKEND_DOMAIN'
+  'FRONTEND_URL' // Added for CORS
 ];
 
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -41,45 +40,13 @@ const app = express();
 
 // Middleware
 app.use(express.json());
-app.use(cookieParser());
-
-// Trust Render's proxy for secure cookies
-app.set('trust proxy', 1);
-
-// Log cookies and headers for debugging
-app.use((req, res, next) => {
-  console.log('Request URL:', req.url);
-  console.log('Cookies:', req.cookies);
-  console.log('Headers:', req.headers);
-  next();
-});
-
-// CORS configuration
 app.use(cors({
-  origin: (origin, callback) => {
-    const allowedOrigins = [
-      process.env.FRONTEND_URL || 'https://speech-park.web.app',
-      'http://localhost:3000'
-    ];
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: process.env.FRONTEND_URL, // e.g., https://your-frontend.onrender.com
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
-
-// Set CORS headers explicitly
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
-  next();
-});
+app.use(cookieParser());
 
 // Initialize EmailJS
 emailjs.init({
@@ -95,7 +62,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   .then(() => console.log("Connected to MongoDB Atlas"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// User Schema
+// Updated User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String },
@@ -148,43 +115,25 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// File upload configurations
-const uploadDir = 'uploads';
+// File upload configuration
+const uploadDir = 'Uploads';
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
 
-// Multer for audio files (for session recordings)
-const audioStorage = multer.diskStorage({
+const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `audio-${Date.now()}-${file.originalname}`)
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
 });
 
-const audioUpload = multer({
-  storage: audioStorage,
+const upload = multer({
+  storage: storage,
   fileFilter: (req, file, cb) => {
     const filetypes = /mp3|wav|m4a|webm/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) return cb(null, true);
-    cb(new Error('Error: Only audio files (mp3, wav, m4a, webm) are allowed!'));
-  }
-});
-
-// Multer for image files (for avatar uploads)
-const imageStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `avatar-${Date.now()}-${file.originalname}`)
-});
-
-const imageUpload = multer({
-  storage: imageStorage,
-  fileFilter: (req, file, cb) => {
-    const filetypes = /jpeg|jpg|png/;
-    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = filetypes.test(file.mimetype);
-    if (extname && mimetype) return cb(null, true);
-    cb(new Error('Error: Only image files (jpeg, jpg, png) are allowed!'));
+    cb('Error: Invalid file type!');
   }
 });
 
@@ -195,33 +144,6 @@ const analyzeTranscription = (transcription) => {
     Reasons: 'The tone suggests positive feelings',
     Suggestions: ['Continue positive activities', 'Maintain routine']
   };
-};
-
-// Cookie-based Authentication Helper
-const checkUserCookie = async (req, res) => {
-  const username = req.cookies.username;
-  console.log('Checking cookie for username:', username);
-
-  if (!username) {
-    console.log('No username cookie provided');
-    return { error: res.status(401).json({ error: 'Please log in to access this resource' }) };
-  }
-
-  try {
-    const user = await User.findOne({
-      username: { $regex: new RegExp(`^${username}$`, 'i') }
-    });
-
-    if (!user) {
-      console.log(`User not found for username: ${username}`);
-      return { error: res.status(401).json({ error: 'User not found' }) };
-    }
-
-    return { user };
-  } catch (error) {
-    console.error('Cookie authentication error:', error.message);
-    return { error: res.status(401).json({ error: 'Authentication failed' }) };
-  }
 };
 
 // Authentication Middleware
@@ -240,11 +162,22 @@ const authMiddleware = async (req, res, next) => {
     req.user = user;
     next();
   } catch (error) {
-    res.status(500).json({ error: "Authentication error: " + error.message });
+    console.error("Authentication error:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 };
+
 // Twilio Client Setup
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+// Cookie Options
+const cookieOptions = {
+  httpOnly: false, // Keep as false since frontend needs access
+  secure: process.env.NODE_ENV === 'production', // Secure in production
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // 'none' for cross-site in production
+  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+  path: '/'
+};
 
 // Forgot Password Route
 app.post('/forgot-password', async (req, res) => {
@@ -260,11 +193,15 @@ app.post('/forgot-password', async (req, res) => {
       return res.status(404).json({ error: 'User with this email does not exist' });
     }
 
+    // Generate verification code
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Set reset token and expiration (1 hour)
     user.resetPasswordToken = verificationCode;
-    user.resetPasswordExpires = Date.now() + 3600000;
+    user.resetPasswordExpires = new Date(Date.now() + 3600000);
     await user.save();
 
+    // Send email with verification code using EmailJS
     await emailjs.send(process.env.EMAILJS_SERVICE_ID, process.env.EMAILJS_TEMPLATE_ID, {
       email: email,
       passcode: verificationCode,
@@ -296,6 +233,7 @@ app.post('/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Invalid or expired verification code' });
     }
 
+    // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedPassword;
     user.resetPasswordToken = undefined;
@@ -353,16 +291,7 @@ app.post("/register", async (req, res) => {
     });
     await user.save();
 
-    // Set cookie for authentication
-    res.cookie('username', username, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
-      path: '/',
-      maxAge: 24 * 60 * 60 * 1000
-    });
-
-    console.log(`Register successful for ${username}, Cookie set: ${username}`);
+    res.cookie('username', username, cookieOptions);
     res.status(201).json({
       message: "Registration successful",
       username,
@@ -376,7 +305,7 @@ app.post("/register", async (req, res) => {
       appointments: []
     });
   } catch (error) {
-    console.error('Register error:', error.message);
+    console.error("Registration error:", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
@@ -395,16 +324,7 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    // Set cookie for authentication
-    res.cookie('username', username, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production' ,
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
-      path: '/',
-      maxAge: 24 * 60 * 60 * 1000
-    });
-
-    console.log(`Login successful for ${username}, Cookie set: ${username}`);
+    res.cookie('username', username, cookieOptions);
     res.status(200).json({
       message: "Login successful",
       username: user.username,
@@ -417,7 +337,7 @@ app.post("/login", async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
-    console.error('Login error:', error.message);
+    console.error("Login error:", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
@@ -425,12 +345,9 @@ app.post("/login", async (req, res) => {
 // Logout Route
 app.post("/logout", (req, res) => {
   res.clearCookie('username', {
-    httpOnly: false,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
-    path: '/'
+    ...cookieOptions,
+    maxAge: 0 // Expire immediately
   });
-  console.log('Logout successful, cookie cleared');
   res.status(200).json({ message: "Logout successful" });
 });
 
@@ -439,22 +356,18 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 app.post('/google-login', async (req, res) => {
   try {
     const { token } = req.body;
-    console.log('Received token:', token); // Log the token
     const ticket = await googleClient.verifyIdToken({
       idToken: token,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
     const payload = ticket.getPayload();
-    console.log('Google payload:', payload); // Log the payload
     const { sub: googleId, email, name } = payload;
 
     let user = await User.findOne({ googleId });
     if (!user) {
       const username = name;
-      console.log('Generated username:', username); // Log the generated username
       const existingUser = await User.findOne({ $or: [{ username }, { email }] });
       if (existingUser) {
-        console.log('Existing user found:', existingUser); // Log existing user
         if (existingUser.username === username) return res.status(400).json({ error: "Derived username already exists" });
         if (existingUser.email === email) return res.status(400).json({ error: "Email already exists" });
       }
@@ -472,19 +385,9 @@ app.post('/google-login', async (req, res) => {
         session: { sessionActive: false, question: '', sessionEnded: false, responses: [], latestAnalysis: null }
       });
       await user.save();
-      console.log('New user created:', user); // Log the new user
     }
 
-    // Set cookie for authentication
-    res.cookie('username', user.username, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
-      path: '/',
-      maxAge: 24 * 60 * 60 * 1000
-    });
-
-    console.log(`Google login successful for ${user.username}, Cookie set: ${user.username}`);
+    res.cookie('username', user.username, cookieOptions);
     res.status(200).json({
       message: "Google login successful",
       username: user.username,
@@ -497,8 +400,101 @@ app.post('/google-login', async (req, res) => {
       appointments: user.appointments
     });
   } catch (error) {
-    console.error("Google login error:", error.message, error.stack); // Log detailed error
-    res.status(400).json({ error: 'Google login failed', details: error.message });
+    console.error("Google login error:", error);
+    res.status(400).json({ error: 'Google login failed' });
+  }
+});
+
+// Analyze Audio Route
+app.post("/analyze_audio", upload.single('file'), async (req, res) => {
+  const { username } = req.body;
+
+  if (!req.file) {
+    return res.status(400).json({ error: "No file uploaded" });
+  }
+
+  if (!username) {
+    return res.status(400).json({ error: "Username is required" });
+  }
+
+  try {
+    const user = await User.findOne({ username });
+    if (!user) {
+      fs.unlinkSync(req.file.path);
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    const transcription = "Sample transcription from audio";
+    const analysis = analyzeTranscription(transcription);
+
+    user.analyses.push({ transcription, analysis });
+    await user.save();
+
+    fs.unlinkSync(req.file.path);
+
+    res.json({
+      username,
+      email: user.email,
+      transcription,
+      analysis,
+      followUpRequired: user.followUpRequired,
+      AppointmentApproved: user.AppointmentApproved,
+      appointments: user.appointments
+    });
+  } catch (error) {
+    if (fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    console.error("Analyze audio error:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
+  }
+});
+
+// Generate PDF Route
+app.post("/generate_pdf", async (req, res) => {
+  const { analysis } = req.body;
+
+  if (!analysis) {
+    return res.status(400).json({ error: "Analysis data is required" });
+  }
+
+  try {
+    const doc = new PDFDocument();
+    const filename = `mental_health_report_${Date.now()}.pdf`;
+    doc.pipe(fs.createWriteStream(filename));
+
+    doc.fontSize(22).text('Mental Health Analysis Report', { align: 'center' });
+    doc.fontSize(10).text(`Date: ${new Date().toLocaleString()}`, { align: 'left' });
+    doc.moveDown();
+
+    doc.fontSize(14).text('Emotions Identified:');
+    (analysis.Emotions || []).forEach(emotion => doc.text(`• ${emotion}`));
+    doc.moveDown();
+
+    doc.fontSize(14).text('Tones Identified:');
+    (analysis.Tones || []).forEach(tone => doc.text(`• ${tone}`));
+    doc.moveDown();
+
+    doc.fontSize(14).text('Possible Reasons:');
+    doc.fontSize(10).text(analysis.Reasons || 'Not provided', { align: 'justify' });
+    doc.moveDown();
+
+    doc.fontSize(14).text('Suggestions:');
+    (analysis.Suggestions || []).forEach(suggestion => doc.text(`✔ ${suggestion}`));
+
+    doc.end();
+
+    res.download(filename, 'Analysis_Report.pdf', (err) => {
+      if (!err) {
+        fs.unlinkSync(filename);
+      } else {
+        console.error('Download error:', err);
+        res.status(500).json({ error: "Failed to download PDF" });
+      }
+    });
+  } catch (error) {
+    console.error("Generate PDF error:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
@@ -550,9 +546,11 @@ app.post('/save_analysis', async (req, res) => {
     res.status(200).json({ message: 'Analysis saved successfully', visits: user.visits });
   } catch (error) {
     console.error('Error saving analysis:', error);
-    res.status(500).json({ error: 'Failed to save analysis' });
+    res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
+
+// Get Latest Analysis
 app.get('/users/username/latest_analysis', authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.username })
@@ -567,7 +565,7 @@ app.get('/users/username/latest_analysis', authMiddleware, async (req, res) => {
         _id: user.session.latestAnalysis._id || 'latest',
         combined_analysis: user.session.latestAnalysis.combined_analysis,
         createdAt: user.session.latestAnalysis.createdAt,
-        questions: user.session.latestAnalysis.questions // Optional
+        questions: user.session.latestAnalysis.questions
       }
     });
   } catch (error) {
@@ -595,10 +593,7 @@ app.delete('/users/username/latest_analysis', authMiddleware, async (req, res) =
 });
 
 // Export All Analyses Route
-app.post("/users/:username/export-analyses", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
+app.post("/users/:username/export-analyses", authMiddleware, async (req, res) => {
   const { username } = req.params;
 
   try {
@@ -649,16 +644,13 @@ app.post("/users/:username/export-analyses", async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Export error:", error.message);
+    console.error("Export error:", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Delete Analysis Route
-app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
+app.delete("/users/:username/analyses/:analysisId", authMiddleware, async (req, res) => {
   const { username, analysisId } = req.params;
   try {
     const result = await User.updateOne(
@@ -680,7 +672,7 @@ app.delete("/users/:username/analyses/:analysisId", async (req, res) => {
 
     res.status(200).json({ success: true, message: "Analysis deleted successfully" });
   } catch (error) {
-    console.error("Error deleting analysis:", error.message);
+    console.error("Error deleting analysis:", error);
     res.status(500).json({ success: false, message: "Server error: " + error.message });
   }
 });
@@ -702,32 +694,19 @@ app.get("/users", async (req, res) => {
       users
     });
   } catch (error) {
-    console.error("Error fetching users:", error.message);
+    console.error("Error fetching users:", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Get User by Username Route
-app.get("/users/username", async (req, res) => {
+app.get("/users/username", authMiddleware, async (req, res) => {
   try {
-    console.log('Request headers for /users/username:', req.headers);
-    console.log('Cookies for /users/username:', req.cookies);
-    const username = req.cookies.username;
-
-    if (!username) {
-      console.log('No username cookie found in /users/username');
-      return res.status(401).json({
-        success: false,
-        message: "No username found in cookies. Please log in."
-      });
-    }
-
     const user = await User.findOne({
-      username: { $regex: new RegExp(`^${username}$`, 'i') }
-    }).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar _id');
+      username: { $regex: new RegExp(`^${req.user.username}$`, 'i') }
+    }).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
 
     if (!user) {
-      console.log(`User not found for username: ${username}`);
       return res.status(404).json({
         success: false,
         message: "User not found"
@@ -745,12 +724,11 @@ app.get("/users/username", async (req, res) => {
         AppointmentApproved: user.AppointmentApproved,
         appointments: user.appointments,
         analyses: user.analyses,
-        avatar: user.avatar,
-        _id: user._id
+        avatar: user.avatar
       }
     });
   } catch (error) {
-    console.error('Error fetching user:', error.message);
+    console.error('Error fetching user:', error);
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -761,9 +739,6 @@ app.get("/users/username", async (req, res) => {
 
 // Delete User Route
 app.delete("/users/:id", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
   const userId = req.params.id;
   try {
     const user = await User.findById(userId);
@@ -773,16 +748,13 @@ app.delete("/users/:id", async (req, res) => {
     await User.deleteOne({ _id: userId });
     res.status(200).json({ message: "User deleted successfully" });
   } catch (error) {
-    console.error("Error deleting user:", error.message);
+    console.error("Error deleting user:", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Update Follow-Up Status Route
 app.patch("/users/:id", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
   const { id } = req.params;
   const { followUpRequired } = req.body;
 
@@ -795,7 +767,7 @@ app.patch("/users/:id", async (req, res) => {
       id,
       { followUpRequired },
       { new: true, runValidators: true }
-    ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar _id');
+    ).select('username email phoneNumber age followUpRequired AppointmentApproved appointments analyses avatar');
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
@@ -806,35 +778,32 @@ app.patch("/users/:id", async (req, res) => {
       user
     });
   } catch (error) {
-    console.error("Error updating follow-up status:", error.message);
+    console.error("Error updating follow-up status:", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
 // Profile Routes
-// Get User Profile
-app.get("/api/user/profile", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
-  const user = auth.user;
+app.get("/api/user/profile", authMiddleware, async (req, res) => {
   try {
-    const profile = await User.findOne({ username: user.username })
-      .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits analyses _id');
+    const user = await User.findOne({ username: req.user.username })
+      .select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments visits -_id');
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
     res.status(200).json({
-      username: profile.username,
-      email: profile.email,
-      name: profile.name || profile.username,
-      avatar: profile.avatar,
-      age: profile.age,
-      phoneNumber: profile.phoneNumber,
-      followUpRequired: profile.followUpRequired,
-      AppointmentApproved: profile.AppointmentApproved,
-      appointments: profile.appointments,
-      visits: profile.visits,
-      analyses: profile.analyses,
-      _id: profile._id
+      username: user.username,
+      email: user.email,
+      name: user.name || user.username,
+      avatar: user.avatar,
+      age: user.age,
+      phoneNumber: user.phoneNumber,
+      followUpRequired: user.followUpRequired,
+      AppointmentApproved: user.AppointmentApproved,
+      appointments: user.appointments,
+      visits: user.visits
     });
   } catch (error) {
     console.error("Error fetching profile:", error);
@@ -842,12 +811,7 @@ app.get("/api/user/profile", async (req, res) => {
   }
 });
 
-// Update User Profile
-app.put("/api/user/profile", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
-  const user = auth.user;
+app.put("/api/user/profile", authMiddleware, async (req, res) => {
   const { name, email, avatar, age, phoneNumber } = req.body;
 
   if (!name || !email) {
@@ -863,14 +827,17 @@ app.put("/api/user/profile", async (req, res) => {
     return res.status(400).json({ error: "Age must be a number between 1 and 120" });
   }
 
-  if (phoneNumber && !/^\+?[1-9]\d{1,14}$/.test(phoneNumber)) {
-    return res.status(400).json({ error: "Invalid phone number format" });
+  if (phoneNumber) {
+    const phoneRegex = /^\+?[\d\s-]{10,}$/;
+    if (!phoneRegex.test(phoneNumber)) {
+      return res.status(400).json({ error: "Invalid phone number format" });
+    }
   }
 
   try {
     const emailInUse = await User.findOne({
       email,
-      username: { $ne: user.username }
+      username: { $ne: req.user.username }
     });
     if (emailInUse) {
       return res.status(400).json({ error: "Email already in use" });
@@ -879,7 +846,7 @@ app.put("/api/user/profile", async (req, res) => {
     if (phoneNumber) {
       const phoneInUse = await User.findOne({
         phoneNumber,
-        username: { $ne: user.username }
+        username: { $ne: req.user.username }
       });
       if (phoneInUse) {
         return res.status(400).json({ error: "Phone number already in use" });
@@ -887,10 +854,14 @@ app.put("/api/user/profile", async (req, res) => {
     }
 
     const updatedUser = await User.findOneAndUpdate(
-      { username: user.username },
+      { username: req.user.username },
       { name, email, avatar, age, phoneNumber },
       { new: true, runValidators: true }
-    ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments analyses _id');
+    ).select('username email name avatar age phoneNumber followUpRequired AppointmentApproved appointments -_id');
+
+    if (!updatedUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
     res.status(200).json({
       message: "Profile updated successfully",
@@ -902,9 +873,7 @@ app.put("/api/user/profile", async (req, res) => {
       phoneNumber: updatedUser.phoneNumber,
       followUpRequired: updatedUser.followUpRequired,
       AppointmentApproved: updatedUser.AppointmentApproved,
-      appointments: updatedUser.appointments,
-      analyses: updatedUser.analyses,
-      _id: updatedUser._id
+      appointments: updatedUser.appointments
     });
   } catch (error) {
     console.error("Error updating profile:", error);
@@ -912,70 +881,37 @@ app.put("/api/user/profile", async (req, res) => {
   }
 });
 
-// Upload Avatar Route
-app.post("/api/user/upload-avatar", imageUpload.single('avatar'), async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
-  const user = auth.user;
-
-  if (!req.file) {
-    return res.status(400).json({ error: 'Avatar image is required' });
-  }
-
-  try {
-    const avatarPath = `/uploads/${req.file.filename}`;
-    const updatedUser = await User.findOneAndUpdate(
-      { username: user.username },
-      { avatar: avatarPath },
-      { new: true }
-    ).select('username email name avatar age phoneNumber _id');
-
-    res.status(200).json({
-      message: 'Avatar uploaded successfully',
-      avatar: avatarPath,
-      user: {
-        username: updatedUser.username,
-        email: updatedUser.email,
-        name: updatedUser.name,
-        avatar: updatedUser.avatar,
-        age: updatedUser.age,
-        phoneNumber: updatedUser.phoneNumber,
-        _id: updatedUser._id
-      }
-    });
-  } catch (error) {
-    console.error('Error uploading avatar:', error);
-    if (fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
-
 // Send SMS Route
-app.post("/api/send-sms", async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
-  const user = auth.user;
-  const { phoneNumber, date, time } = req.body;
+app.post("/api/send-sms", authMiddleware, async (req, res) => {
+  const { phoneNumber, date, time, status = 'Scheduled' } = req.body;
 
   if (!phoneNumber || !date || !time) {
     return res.status(400).json({ error: "Phone number, date, and time are required" });
   }
 
   const phoneRegex = /^\+[1-9]\d{1,14}$/;
-  if (!phoneRegex.test(phoneNumber)) {
+  if (!phoneNumber.match(phoneRegex.test(phoneNumber))) {
     return res.status(400).json({ error: "Invalid phone number format. Must include country code (e.g., +91)" });
   }
 
   try {
-    if (user.phoneNumber !== phoneNumber.replace('+91', '')) {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || user.phoneNumber !== phoneNumber.replace('+91', '')) {
       return res.status(403).json({ error: "Phone number does not match user profile" });
     }
 
-    const messageBody = `Hi, just a reminder: you’re set to see Dr. Prashik on ${date} at ${time}`;
+    let messageBody;
+    switch(status) {
+      case 'Rescheduled':
+        messageBody = `Hi, your appointment with Dr. has been rescheduled to ${date} at ${time}.`;
+        break;
+      case 'Cancelled':
+        messageBody = `Hi, your appointment with Dr. on ${date} at ${time} has been cancelled.`;
+        break;
+      case 'Scheduled':
+      default:
+        messageBody = `Hi, reminder: you're set to see Dr. on ${date} at ${time}`;
+    }
 
     const message = await client.messages.create({
       body: messageBody,
@@ -991,6 +927,7 @@ app.post("/api/send-sms", async (req, res) => {
   }
 });
 
+// Approve Appointment Route
 app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
   const { date, time, doctor } = req.body;
 
@@ -999,8 +936,7 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
   }
 
   try {
-    const user = await User.findOneAndUpdate(
-      { username: req.user.username },
+    const user = await User.findOneAndUpdate({ username: req.user.username },
       {
         $set: { AppointmentApproved: true },
         $push: {
@@ -1014,7 +950,7 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
         }
       },
       { new: true, runValidators: true }
-    ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
+      ).select('username email phoneNumber AppointmentApproved followUpRequired appointments');
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
@@ -1032,7 +968,7 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Error approving appointment:", error);
+    console.error("Error approving appointment", error);
     res.status(500).json({ error: "Server error: " + error.message });
   }
 });
@@ -1046,20 +982,18 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
   }
 
   try {
-    const user = await User.findById(userId);
-    if (!user) {
+    const user = await User.findById(userId);    if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (!user.appointments || user.appointments.length <= appointmentIndex) {
-      return res.status(404).json({ error: "Appointment not found" });
+    if (!user.appointments || user.appointments.length <= appointmentIndex) {      return res.status(404).json({ error: "Appointment not found" });
     }
 
     // Update appointment
     user.appointments[appointmentIndex] = {
       ...user.appointments[appointmentIndex].toObject(), // Convert to plain object
-      date: newDate,
-      time: newTime,
+      date,: newDate,
+      time,: newTime,
       status: 'Rescheduled',
       createdAt: new Date()
     };
@@ -1070,58 +1004,55 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
     if (user.phoneNumber) {
       let formattedPhoneNumber = user.phoneNumber;
       // Ensure phone number doesn't already include country code
-        console.log(formattedPhoneNumber);
       if (!formattedPhoneNumber.startsWith('+')) {
+        console.log(formattedPhoneNumber);
         formattedPhoneNumber = `+91${formattedPhoneNumber}`;
       }
       try {
         await client.messages.create({
-          body: `Hi, your appointment with Dr. Prashik has been rescheduled to ${newDate} at ${newTime}`,
+          body: `Hi, your appointment with Dr. has been rescheduled to ${newDate} at ${newTime}.`,
           from: process.env.TWILIO_PHONE_NUMBER,
           to: formattedPhoneNumber
         });
       } catch (smsError) {
-        console.error("Failed to send SMS:", smsError.message);
+        console.error("Failed to send SMS", error: smsError.message);
         // Continue despite SMS failure
       }
-    }
+    } catch (err)
 
     res.status(200).json({
       message: "Appointment rescheduled successfully",
       appointment: user.appointments[appointmentIndex]
     });
+
   } catch (error) {
     console.error("Error rescheduling appointment:", error);
-    res.status(500).json({ error: "Server error: " + error.message });
+    res.status(500).json({ error: "Server error: " + error: " + error.message });
+    }
   }
 });
 
 // Cancel Appointment Route
 app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
-  const { userId, appointmentIndex } = req.body;
+  const { userId, appointmentIndex } = req.body; {
 
   if (!userId || appointmentIndex === undefined) {
     return res.status(400).json({ error: "User ID and appointment index are required" });
   }
 
   try {
-    const user = await User.findById(userId);
-    if (!user) {
+    const user = await User.findById(userId);    if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (!user.appointments || user.appointments.length <= appointmentIndex) {
-      return res.status(404).json({ error: "Appointment not found" });
-    }
+    if (!user.appointments || user.appointments.length <= appointmentIndex) {      return res.status(400).json({ error: "Appointment not found" });
+      }
 
-    const cancelledAppointment = user.appointments[appointmentIndex].toObject();
-    // Update appointment status
-    user.appointments[appointmentIndex] = {
-      ...cancelledAppointment,
-      status: 'Cancelled'
+    const cancelledAppointment = await user.appointments[appointmentIndex].toObject();    // Update appointment status
+    user.appointments[appointmentIndex] = {      ...cancelledAppointment,      status: 'Cancelled'
     };
 
-    // Check if there are any non-cancelled appointments left
+    // Check if there are any any non-cancelled appointments left
     const hasActiveAppointments = user.appointments.some(appt => appt.status !== 'Cancelled');
     user.AppointmentApproved = hasActiveAppointments;
 
@@ -1131,56 +1062,54 @@ app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
     if (user.phoneNumber) {
       let formattedPhoneNumber = user.phoneNumber;
       if (!formattedPhoneNumber.startsWith('+')) {
-        formattedPhoneNumber = `+91${formattedPhoneNumber}`;
+        console.log(formattedPhoneNumber);
+        formattedPhoneNumber = `+91${user.phoneNumber}`;
       }
       try {
         await client.messages.create({
-          body: `Hi, your appointment with Dr. Prashik on ${cancelledAppointment.date} at ${cancelledAppointment.time} has been cancelled`,
+          body: `Hi`, your ${user.appointment with Dr. on ${cancelledAppointment.date} at ${dateTime} has been cancelled`,
           from: process.env.TWILIO_PHONE_NUMBER,
           to: formattedPhoneNumber
         });
       } catch (smsError) {
-        console.error("Failed to send SMS:", smsError.message);
+        console.error("Failed to send SMS", error: smsError.message);
         // Continue despite SMS failure
       }
-    }
+    } catch (error) {
+    console.error("Error cancelling appointment:", error);
+    res.status(500).json({ error: "Server error: " + error: error.message });
+  }
 
-    res.status(200).json({
+    res.status(500).json({
       message: "Appointment cancelled successfully",
       appointments: user.appointments,
-      AppointmentApproved: user.AppointmentApproved
+      AppointmentApproved: user.appointmentApproved
     });
-  } catch (error) {
-    console.error("Error cancelling appointment:", error);
-    res.status(500).json({ error: "Server error: " + error.message });
-  }
-});
-
+  });
 
 // Session Management Routes
 // Get Active Session
-app.get('/api/session/active', async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
-  const user = auth.user;
+app.get('/api/session/active', authMiddleware, async (req, res) => {
   try {
-    res.status(200).json({
+    const user = await User.findOne({ username: req.user.username }).then(
+      .select('session');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.status(
+200).status(200).json({
       active: user.session.sessionActive,
       question: user.session.question,
       sessionEnded: user.session.sessionEnded
     });
   } catch (error) {
     console.error('Error fetching session:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    res.status(500).json({ error: 'Server error: ' + error.message' });
   }
 });
 
 // Start Session
-app.post('/api/session/start', async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
-
+app.post('/api/session/start', authMiddleware, async (req, res) => {
   const { userId, question } = req.body;
 
   if (!userId || !question) {
@@ -1189,7 +1118,7 @@ app.post('/api/session/start', async (req, res) => {
 
   try {
     const user = await User.findById(userId);
-    if (!user) {
+    if (!userId) {
       return res.status(404).json({ error: 'User not found' });
     }
 
@@ -1198,11 +1127,11 @@ app.post('/api/session/start', async (req, res) => {
       {
         $set: {
           'session.sessionActive': true,
-          'session.question': question,
-          'session.sessionEnded': false,
+          'session.session.question': question,
+          'updatedAt': false,
           'session.responses': [],
           'session.latestAnalysis': null,
-          'session.updatedAt': new Date()
+          'session.session.updatedAt': updatedAt
         }
       },
       { new: true }
@@ -1210,143 +1139,144 @@ app.post('/api/session/start', async (req, res) => {
 
     if (!updatedUser) {
       return res.status(404).json({ error: 'User not found' });
-    }
+      }
 
-    console.log(`Session started for user ${userId} with question: ${question}`);
+    console.log(`Session started for user ${userId} with ${question}question: ${question}`);;
     res.status(200).json({ message: 'Session started' });
-  } catch (error) {
-    console.error('Error starting session:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
+    } catch (error) {
+      console.error('Error starting session:', error);
+      res.status(500).json({ 'error': error: 'Server error: ' + error.message });
+    }
   }
-});
+);
 
 // Record Session Response
-app.post('/api/session/record_response', audioUpload.single('file'), async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
+app.post('/api/session/record_response', authMiddleware, upload.single('file'), async (req, res) => {
+    try {
+    const { question, language } = req.body;
 
-  const user = auth.user;
-  const { question, language } = req.body;
-
-  if (!req.file) {
-    return res.status(400).json({ error: 'Audio file is required' });
-  }
-
-  if (!question || !language) {
-    return res.status(400).json({ error: 'Question and language are required' });
-  }
-
-  try {
-    if (!user.session.sessionActive || user.session.question !== question) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'No active session or invalid question' });
+    if (!req.file) {
+      return res.status(400).json({ error: 'Audio file is required' }) });
     }
 
-    if (user.session.responses.length > 0) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'Response already recorded for this session' });
+    if (!question || !language) {
+      return res.status(400).json({ error: 'Question language and are language required' });
     }
 
-    const response = {
-      audioPath: req.file.path,
-      question,
-      language,
-      createdAt: new Date()
-    };
+    try {
+      const user = await  User.findOne({ username: req.user.username }).then(
+      if (!user) {
+        fs.unlinkSync(req.file.path);
+        return res.status('404').json({ error: 'User not found' });
+      }
 
-    user.session.responses.push(response);
-    await user.save();
+      if (!user.session.sessionActive || user.session.session.question || user.session.question !== question) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: 'No active session or invalid question' });
+      } else if
 
-    res.status(200).json({ message: 'Response recorded successfully' });
-  } catch (error) {
-    if (fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+      // Check if response already exists
+      if (user.session.responses.length > > 0) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: 'Response already exists' recorded });
+        }
+
+      const response = {
+        audioPath,: req.file.path,
+        question,
+        language,
+        createdAt: new response()
+      };
+
+      user.createdsession.responses.push(response);
+      await user.save();
+
+      res.status().json(200).json({ message: 'Response recorded successfully' });
+    } catch (error) {
+      if (errorfs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+        console.error('Error recording response', error: error);
+        res.status(500).json({ error: 'Server error: ' + error.message });
+      }
     }
-    console.error('Error recording response:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
+  });
 
 // Get Session Responses
-app.get('/api/session/responses/:userId', async (req, res) => {
-  const auth = await checkUserCookie(req, res);
-  if (auth.error) return;
+app.get('/session/session/responses/:userId', authMiddleware, async (req, res) => {
+      const { userId } = req.params;
 
-  const { userId } = req.params;
-
-  try {
-    const user = await User.findById(userId);
-    if (!user) {
+    try {
+      const user = await User.findById(userId);    if (!res) {
       return res.status(404).json({ error: 'User not found' });
-    }
+    } catch
 
-    if (!user.session.sessionActive) {
-      return res.status(400).json({ error: 'No active session for this user' });
-    }
+      if (!user.session.sessionActive) {
+        return res.status(400).json({ error: 'No active session for this user' }) {
+      }
 
-    const responses = user.session.responses.map(response => ({
-      audioPath: response.audioPath,
-      question: response.question,
-      language: response.language,
-      createdAt: response.createdAt
-    }));
+      const responses = [
+        user.session.responses.map(response => ({
+        audioPath: response.audioPath,
+        question,: => response.question,
+        language,: response.language,
+        createdAt => response.createdAt
+      }));
 
-    res.status(200).json({ responses });
-  } catch (error) {
-    console.error('Error fetching session responses:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
+      res.status(200).json({ responses: [] });
+      } catch (error) {
+      console.error('Error fetching responses:', error);
+      res.status(500).json({ error: 'Server error: ' + error.message });
+    });
+  });
 
 // Save Session Analysis
 app.post('/api/session/save_analysis', authMiddleware, async (req, res) => {
   const { userId, questions, combinedAnalysis } = req.body;
 
   if (!userId || !questions || !combinedAnalysis) {
-    return res.status(400).json({ error: 'User ID, questions, and combined analysis are required' });
+    res res.status(400).json({ error: 'User ID, ID and questions, and combined analysis are required' });
   }
 
-  if (!Array.isArray(questions) || questions.length === 0) {
-    return res.status(400).json({ error: 'Questions must be a non-empty array' });
+  if (!Array.isArray(questions) || questions.length === 0) ) {
+    res.status(400).json({ error: 'Questions must be empty' a non-empty array' });
   }
 
   try {
-    const user = await User.findById(userId);
-    if (!user) {
+    const user = await User.findById(userId);    if (!res) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     // Save analysis to session
     user.session.latestAnalysis = {
-      questions,
-      combined_analysis: combinedAnalysis,
-      createdAt: new Date()
+      questions,,
+      analysisAnalysis: combinedAnalysis,
+      createdAt,: newAnalysis
     };
 
     user.visits += 1;
 
-    // Clean up response audio files
+    // Clean response
     user.session.responses.forEach(response => {
       if (fs.existsSync(response.audioPath)) {
-        fs.unlinkSync(response.audioPath);
+        fs.unlinkSync(response.audioPath));
       }
-    });
 
     user.session.responses = [];
+
     await user.save();
 
-    res.status(200).json({ message: 'Analysis saved successfully', visits: user.visits });
-  } catch (error) {
-    console.error('Error saving session analysis:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
+    res.status(200).json({ message: 'Analysis saved successfully', visits: user.visits' });
+    } catch (error) {
+      console.error('Error saving analysis:', error);
+      res.status(500).json({ error: 'Server error: ' + error.message });
+    } catch (error)
+  };
 
 // Get Latest Session Analysis
 app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.user.username })
-      .select('session.latestAnalysis');
+    const user = await User.findOne({ username: req.user.username }) {
+      .select('user.session');
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -1357,34 +1287,39 @@ app.get('/api/session/latest_analysis', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Error fetching latest analysis:', error);
     res.status(500).json({ error: 'Server error: ' + error.message });
-  }
+    } catch (err)
+  } catch (error)
 });
-app.get('/api/session/latest_analysis1', authMiddleware, async (req, res) => {
+
+// Get Latest Analysis
+app.get('/api/session/latest_analysis1', authMiddleware, async (req, res)) => {
   try {
     const user = await User.findOne({ username: req.user.username })
-      .select('session.latestAnalysis');
+      .select('user.session.latestAnalysis;
     if (!user) {
-      console.log('User not found for username:', req.user.username);
+      console.log('User not found for username:', error);
       return res.status(404).json({ error: 'User not found' });
     }
 
-    if (!user.session || !user.session.latestAnalysis) {
-      console.log('No latest analysis for user:', req.user.username);
-      return res.status(404).json({ error: 'No latest analysis available' });
+    if (!user.session || !user.session.latestAnalysis || !user.session.latestAnalysis) {
+      console.log('No latest analysis for user:', error);
+      res.status('404').json('No analysis found' );
+    } else {
+      const response = {
+        status: analysis: {
+          questions: []user.session.latestAnalysis.questions || [],
+          analysis: user.session.latestAnalysis || 'Not provided',
+          createdAt: user.createdAt || new Date()
+        } catch (error) {
+          console.error('Error:', error);
+          res.status(500).json('Server error: ' + error.message);
+        };
+        console.log('Error sending analysis:', response);
+        res.status(200).json(response);
+      } catch (error) {
+      console.error('Failed:', error);
+      res.status(500).json({ error: 'Server error' + error.message });
     }
-
-    const response = {
-      analysis: {
-        questions: user.session.latestAnalysis.questions || [],
-        combined_analysis: user.session.latestAnalysis.combined_analysis || 'Not provided',
-        createdAt: user.session.latestAnalysis.createdAt || new Date()
-      }
-    };
-    console.log('Sending latest analysis for user:', req.user.username, response);
-    res.status(200).json(response);
-  } catch (error) {
-    console.error('Error fetching latest analysis:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
@@ -1400,44 +1335,45 @@ app.post('/api/session/end', authMiddleware, async (req, res) => {
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
+    } else if
+
+    if (!user.session.sessionActive || !user.session.active) {
+      return res.status(400).json({ error: 'No active session for user' });
     }
 
-    if (!user.session.sessionActive) {
-      return res.status(400).json({ error: 'No active session for this user' });
-    }
-
-    // Clean up response audio files
+    // Clean up response files
     user.session.responses.forEach(response => {
-      if (fs.existsSync(response.audioPath)) {
-        fs.unlinkSync(response.audioPath);
+      if (fs.exists(response.audioPath)) {
+        fs.unlinkSync(response.audioPath));
       }
-    });
+    }));
 
     const updatedUser = await User.findByIdAndUpdate(
       userId,
       {
         $set: {
           'session.sessionActive': false,
-          'session.question': '',
-          'session.sessionEnded': true,
+          'session.session.question': '',
+          'session.active': true,
           'session.responses': [],
-          'session.updatedAt': new Date()
+          updateAt: true
         }
       },
-      { new: true }
-    );
+      { new: true } );
 
     if (!updatedUser) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Not found' });
     }
 
     console.log(`Session ended for user ${userId}`);
     res.status(200).json({ message: 'Session ended' });
-  } catch (error) {
-    console.error('Error ending session:', error);
-    res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
+    } catch (err) {
+      console.error('Error ending session:', err);
+      res.status(500).json({ error: error: 'Server error: ' + err.message });
+    }
+  });
 
-const PORT = process.env.PORT1 || 5001;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT1 || 3000; // Use Render's assigned port
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
