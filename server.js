@@ -1629,7 +1629,7 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
       });
     } catch (error) {
       console.error('Error fetching latest analysis:', error);
-      res.status(500).json({ error: 'Server error: ' + error.message }));
+      res.status(500).json({ error: 'Server error: ' + error.message });
     }
   });
 
@@ -1713,5 +1713,5 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
     }
   });
 
-  const PORT = process.env.PORT || process.env.PORT1 || 5001;
+  const PORT = process.env.PORT1 || 5001;
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
