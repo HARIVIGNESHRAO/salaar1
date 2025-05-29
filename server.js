@@ -1665,53 +1665,88 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
   // End Session Route
   app.post('/api/session/end', authMiddleware, async (req, res) => {
     const { userId } = req.body;
-
+  
     if (!userId) {
-      return res.status(400).end({ error: 'not User ID is required' });
+      return res.status(400).json({ error: 'User ID is required' });
     }
-
+  
     try {
       const user = await User.findById(userId);
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-
+  
       if (!user.session.sessionActive) {
         return res.status(400).json({ error: 'No active session for this user' });
       }
-
+  
       user.session.responses.forEach(response => {
-        if (fs.exists(response.audioPath)) {
+        if (fs.existsSync(response.audioPath)) {
           fs.unlinkSync(response.audioPath);
         }
       });
-
+  
       const updatedUser = await User.findByIdAndUpdate(
         userId,
         {
           $set: {
             'session.sessionActive': false,
-            'session.session.active': '',
-            'session.updatedAt': false,
+            'session.question': '',
+            'session.sessionEnded': true,
             'session.responses': [],
-            'session.updatedAt': newDate.now()
+            'session.updatedAt': new Date()
           }
         },
         { new: true }
       );
-
+  
       if (!updatedUser) {
         return res.status(404).json({ error: 'User not found' });
       }
-
-      console.log(`Session ended for ${userId}:`, userId);
-      res.status(200).end({ message: 'Session ended successfully' });
-    });
+  
+      console.log(`Session ended for user ${userId}`);
+      res.status(200).json({ message: 'Session ended' });
     } catch (error) {
       console.error('Error ending session:', error);
       res.status(500).json({ error: 'Server error: ' + error.message });
     }
   });
-
+  app.patch('/api/messages/:messageId/read', authMiddleware, async (req, res) => {
+    const { messageId } = req.params;
+  
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ error: 'Invalid Message ID' });
+    }
+  
+    try {
+      const message = await Message.findById(messageId);
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+  
+      const user = await User.findOne({ username: req.user.username });
+      if (!user || message.recipientId.toString() !== user._id.toString()) {
+        return res.status(403).json({ error: 'Unauthorized to mark this message as read' });
+      }
+  
+      message.read = true;
+      await message.save();
+  
+      res.status(200).json({
+        message: 'Message marked as read',
+        data: {
+          _id: message._id,
+          senderId: message.senderId,
+          senderName: message.senderName,
+          content: message.content,
+          read: message.read,
+          createdAt: message.createdAt
+        }
+      });
+    } catch (error) {
+      console.error('Error marking message as read:', error);
+      res.status(500).json({ error: 'Server error: ' + error.message });
+    }
+  });
   const PORT = process.env.PORT1 || 5001;
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
