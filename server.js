@@ -1658,7 +1658,7 @@ app.post('/api/session/record_response', authMiddleware, upload.single('file'), 
       res.status(200).json(response);
     } catch (error) {
       console.error('Error fetching latest analysis:', error);
-      res.status(500).json({ error: 'Server error: ' + error.message }));
+      res.status(500).json({ error: 'Server error: ' + error.message });
     }
   });
 
