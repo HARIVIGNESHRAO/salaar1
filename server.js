@@ -1249,40 +1249,50 @@ app.patch("/api/user/approve-appointment", authMiddleware, async (req, res) => {
 });
 
 // Reschedule Appointment Route
-app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
-  const { userId, appointmentIndex, newDate, newTime } = req.body;
 
-  if (!userId || appointmentIndex === undefined || !newDate || !newTime) {
-    return res.status(400).json({ error: "User ID, appointment index, new date, and new time are required" });
+// Reschedule Appointment Route
+app.patch("/api/reschedule-appointment/:appointmentId", authMiddleware, async (req, res) => {
+  const { appointmentId } = req.params;
+  const { newDate, newTime } = req.body;
+
+  // Validate input
+  if (!newDate || !newTime) {
+    return res.status(400).json({ error: "New date and new time are required" });
   }
 
-  if (!mongoose.Types.ObjectId.isValid(userId)) {
-    return res.status(400).json({ error: "Invalid User ID format" });
+  // Validate appointmentId format
+  if (!mongoose.Types.ObjectId.isValid(appointmentId)) {
+    return res.status(400).json({ error: "Invalid Appointment ID format" });
   }
 
   try {
-    const user = await User.findById(userId);
+    const user = await User.findOne({ username: req.user.username });
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (!user.appointments || user.appointments.length <= appointmentIndex) {
+    // Find appointment by ID
+    const appointment = user.appointments.id(appointmentId);
+    if (!appointment) {
       return res.status(404).json({ error: "Appointment not found" });
     }
 
-    if (user.appointments[appointmentIndex].status === 'Cancelled') {
+    // Check if the appointment is already cancelled
+    if (appointment.status === 'Cancelled') {
       return res.status(400).json({ error: "Cannot reschedule a cancelled appointment" });
     }
 
+    // Check if the new slot is already booked
     const isSlotTaken = user.bookedSlots.get(newDate)?.includes(newTime);
     if (isSlotTaken) {
       return res.status(400).json({ error: "The selected time slot is already booked" });
     }
 
-    const oldAppointment = user.appointments[appointmentIndex].toObject();
-    const oldDate = oldAppointment.date;
-    const oldTime = oldAppointment.time;
+    // Store old appointment details for SMS
+    const oldDate = appointment.date;
+    const oldTime = appointment.time;
 
+    // Remove old slot from bookedSlots
     if (user.bookedSlots.has(oldDate)) {
       const updatedSlots = user.bookedSlots.get(oldDate).filter(time => time !== oldTime);
       if (updatedSlots.length > 0) {
@@ -1292,26 +1302,27 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
       }
     }
 
+    // Add new slot to bookedSlots
     const updatedSlots = user.bookedSlots.get(newDate) || [];
     updatedSlots.push(newTime);
     user.bookedSlots.set(newDate, updatedSlots);
 
-    user.appointments[appointmentIndex] = {
-      ...oldAppointment,
-      date: newDate,
-      time: newTime,
-      status: 'Rescheduled',
-      createdAt: new Date(),
-    };
+    // Update appointment details
+    appointment.date = newDate;
+    appointment.time = newTime;
+    appointment.status = 'Rescheduled';
+    appointment.createdAt = new Date();
 
     await user.save();
 
+    // Send SMS notification (non-critical)
     if (user.phoneNumber) {
       let formattedPhoneNumber = user.phoneNumber;
       if (!formattedPhoneNumber.startsWith('+')) {
         formattedPhoneNumber = `+91${formattedPhoneNumber}`;
       }
 
+      // Validate phone number format
       const phoneRegex = /^\+[1-9]\d{1,14}$/;
       if (!phoneRegex.test(formattedPhoneNumber)) {
         console.error("Invalid phone number format for SMS:", formattedPhoneNumber);
@@ -1325,13 +1336,14 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
           console.log(`SMS sent for rescheduled appointment to ${formattedPhoneNumber}`);
         } catch (smsError) {
           console.error("Failed to send SMS:", smsError.message);
+          // Continue execution even if SMS fails
         }
       }
     }
 
     res.status(200).json({
       message: "Appointment rescheduled successfully",
-      appointment: user.appointments[appointmentIndex],
+      appointment,
       appointments: user.appointments,
       AppointmentApproved: user.AppointmentApproved,
     });
@@ -1342,32 +1354,35 @@ app.post("/api/reschedule-appointment", authMiddleware, async (req, res) => {
 });
 
 // Cancel Appointment Route
-app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
-  const { userId, appointmentIndex } = req.body;
+app.delete("/api/cancel-appointment/:appointmentId", authMiddleware, async (req, res) => {
+  const { appointmentId } = req.params;
 
-  if (!userId || appointmentIndex === undefined) {
-    return res.status(400).json({ error: "User ID and appointment index are required" });
-  }
-
-  if (!mongoose.Types.ObjectId.isValid(userId)) {
-    return res.status(400).json({ error: "Invalid User ID format" });
+  // Validate appointmentId format
+  if (!mongoose.Types.ObjectId.isValid(appointmentId)) {
+    return res.status(400).json({ error: "Invalid Appointment ID format" });
   }
 
   try {
-    const user = await User.findById(userId);
+    const user = await User.findOne({ username: req.user.username });
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (!user.appointments || user.appointments.length <= appointmentIndex) {
+    // Find appointment by ID
+    const appointment = user.appointments.id(appointmentId);
+    if (!appointment) {
       return res.status(404).json({ error: "Appointment not found" });
     }
 
-    if (user.appointments[appointmentIndex].status === 'Cancelled') {
+    // Check if the appointment is already cancelled
+    if (appointment.status === 'Cancelled') {
       return res.status(400).json({ error: "Appointment is already cancelled" });
     }
 
-    const cancelledAppointment = user.appointments[appointmentIndex].toObject();
+    // Store appointment details for SMS
+    const cancelledAppointment = { ...appointment.toObject() };
+
+    // Remove slot from bookedSlots
     const appointmentDate = cancelledAppointment.date;
     const appointmentTime = cancelledAppointment.time;
     if (user.bookedSlots.has(appointmentDate)) {
@@ -1379,22 +1394,23 @@ app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
       }
     }
 
-    user.appointments[appointmentIndex] = {
-      ...cancelledAppointment,
-      status: 'Cancelled',
-    };
+    // Update appointment status
+    appointment.status = 'Cancelled';
 
+    // Update AppointmentApproved status
     const hasActiveAppointments = user.appointments.some(appt => appt.status !== 'Cancelled');
     user.AppointmentApproved = hasActiveAppointments;
 
     await user.save();
 
+    // Send SMS notification (non-critical)
     if (user.phoneNumber) {
       let formattedPhoneNumber = user.phoneNumber;
       if (!formattedPhoneNumber.startsWith('+')) {
         formattedPhoneNumber = `+91${formattedPhoneNumber}`;
       }
 
+      // Validate phone number format
       const phoneRegex = /^\+[1-9]\d{1,14}$/;
       if (!phoneRegex.test(formattedPhoneNumber)) {
         console.error("Invalid phone number format for SMS:", formattedPhoneNumber);
@@ -1408,6 +1424,7 @@ app.post("/api/cancel-appointment", authMiddleware, async (req, res) => {
           console.log(`SMS sent for cancelled appointment to ${formattedPhoneNumber}`);
         } catch (smsError) {
           console.error("Failed to send SMS:", smsError.message);
+          // Continue execution even if SMS fails
         }
       }
     }
